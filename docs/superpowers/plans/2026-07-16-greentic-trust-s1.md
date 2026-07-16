@@ -24,6 +24,21 @@
 - Base64: **`STANDARD`** for cert/signature fields (matches store-server and the runner). **`URL_SAFE_NO_PAD`** for JWK `x` members (RFC 7515 §2 / RFC 8037). Mixing these silently breaks interop — the two encodings agree on most bytes and diverge on a few.
 - Time is always a caller-supplied `chrono::DateTime<Utc>` parameter. Never call `Utc::now()` inside the crate.
 
+## Register the module BEFORE writing its tests
+
+Each task creates a new `src/<module>.rs` holding only its test module, runs the tests to watch them
+fail, then implements. That "watch it fail" step is only real if `src/lib.rs` already declares
+`pub mod <module>;`. **Without the declaration the file is not compiled at all**, so
+`cargo test --lib <module>` filters to zero tests and reports `ok` — the step passes while proving
+nothing, and you would proceed believing you had seen a red test.
+
+So in every task: add `pub mod <module>;` to `src/lib.rs` as the *first* action, before writing the
+test module. Add the `pub use <module>::<Type>;` re-export later, at the step the task names — that
+one cannot be written until the type exists.
+
+The failure you must see is `cannot find type X in this scope` (or similar) from the compiler, with
+a non-zero test count attempted. `test result: ok. 0 passed; 0 filtered out` is not a failure.
+
 ## Mutation Check Protocol
 
 Several tasks end with a mutation check: break the invariant on purpose and confirm the test that
@@ -1267,9 +1282,11 @@ git commit -m "feat: verify publisher certificates with signed expiry and domain
   - `greentic_trust::resolver::HttpResolver` with `HttpResolver::new(ttl: Duration, capacity: u64) -> Self`.
   - `HttpResolver::allow_http(self) -> Self` — **gated `#[cfg(any(test, feature = "testing"))]`**. It disables the HTTPS requirement, which is the only thing making a fetched root key trustworthy, so a production build must not have it at all.
 
-- [ ] **Step 1: Add `async-trait` to `Cargo.toml`**
+- [ ] **Step 1: Add `async-trait` to `Cargo.toml`, and register the module**
 
 In `[dependencies]`, add: `async-trait = "0.1"`
+
+In `src/lib.rs`, add `pub mod resolver;` alongside the existing module declarations. Do this NOW, before writing the tests — see "Register the module BEFORE writing its tests" in Global Constraints. Without it, Step 3's failure check is vacuous. The `pub use` re-export comes later, at Step 5.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1590,9 +1607,11 @@ git commit -m "feat: resolve did:web documents with a single-flight TTL cache"
 - Produces:
   - `greentic_trust::chain::verify_describe(describe: &serde_json::Value, trusted_did: &DidWeb, resolver: &dyn RootResolver, now: DateTime<Utc>) -> Result<VerifyingKey, TrustError>`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Register the module, then write the failing tests**
 
-Create `src/chain.rs` containing only this test module for now:
+In `src/lib.rs`, add `pub mod chain;` alongside the existing module declarations. Do this FIRST — see "Register the module BEFORE writing its tests" in Global Constraints. Without it, Step 2's failure check is vacuous. The `pub use` re-export comes later, at Step 4.
+
+Then create `src/chain.rs` containing only this test module for now:
 
 ```rust
 #[cfg(test)]
