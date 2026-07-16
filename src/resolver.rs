@@ -29,12 +29,25 @@ pub trait RootResolver: Send + Sync {
     async fn resolve(&self, did: &DidWeb) -> Result<Arc<TrustDocument>, TrustError>;
 }
 
+/// Default total request timeout: long enough for a slow-but-legitimate
+/// origin to serve a small static JSON document, short enough that a
+/// slow-loris origin cannot park `verify_describe` indefinitely — including
+/// every caller queued behind it by the single-flight cache.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default TCP+TLS connect timeout. A live, correctly-routed origin completes
+/// a handshake in well under a second; this only needs to be long enough to
+/// absorb ordinary network jitter, not to wait out a black-holed host.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Fetches documents over HTTPS and caches them for a TTL.
 #[derive(Debug, Clone)]
 pub struct HttpResolver {
     cache: Cache<String, Arc<TrustDocument>>,
     http: reqwest::Client,
     allow_http: bool,
+    timeout: Duration,
+    connect_timeout: Duration,
 }
 
 /// Build the underlying `reqwest::Client`.
@@ -44,10 +57,16 @@ pub struct HttpResolver {
 /// legitimate. Both properties must be enforced on the `Client` itself, not
 /// just on the initial URL string — a redirect hop is invisible to a check
 /// that only inspects the URL passed in.
-fn build_client(allow_http: bool) -> Result<reqwest::Client, TrustError> {
+fn build_client(
+    allow_http: bool,
+    timeout: Duration,
+    connect_timeout: Duration,
+) -> Result<reqwest::Client, TrustError> {
     reqwest::Client::builder()
         .https_only(!allow_http)
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .connect_timeout(connect_timeout)
         .build()
         .map_err(|source| TrustError::ClientBuild {
             source: Arc::new(source),
@@ -55,7 +74,9 @@ fn build_client(allow_http: bool) -> Result<reqwest::Client, TrustError> {
 }
 
 impl HttpResolver {
-    /// Build a resolver caching up to `capacity` documents for `ttl`.
+    /// Build a resolver caching up to `capacity` documents for `ttl`, using
+    /// the default timeouts (10s total, 5s to connect). Use
+    /// [`Self::with_timeout`] to override the total timeout.
     ///
     /// # Errors
     /// [`TrustError::ClientBuild`] if the underlying HTTP client cannot be
@@ -68,9 +89,30 @@ impl HttpResolver {
                 .max_capacity(capacity)
                 .time_to_live(ttl)
                 .build(),
-            http: build_client(false)?,
+            http: build_client(false, DEFAULT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT)?,
             allow_http: false,
+            timeout: DEFAULT_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         })
+    }
+
+    /// Rebuild with a caller-chosen total request timeout. The connect
+    /// timeout stays at the default.
+    ///
+    /// Returns `Result`, not `Self`: this rebuilds the underlying client (see
+    /// [`Self::allow_http`]'s doc comment for why a timeout change needs a
+    /// rebuild rather than a field flip), and that rebuild is exactly the
+    /// fallible `ClientBuilder::build()` call [`Self::new`] must not unwrap.
+    /// A `-> Self` signature here would force swallowing that failure,
+    /// reintroducing the silently-wrong-client problem the HTTPS/redirect fix
+    /// exists to close.
+    ///
+    /// # Errors
+    /// [`TrustError::ClientBuild`], see [`Self::new`].
+    pub fn with_timeout(mut self, timeout: Duration) -> Result<Self, TrustError> {
+        self.timeout = timeout;
+        self.http = build_client(self.allow_http, self.timeout, self.connect_timeout)?;
+        Ok(self)
     }
 
     /// Permit plain HTTP.
@@ -90,7 +132,7 @@ impl HttpResolver {
     #[cfg(any(test, feature = "testing"))]
     pub fn allow_http(mut self) -> Result<Self, TrustError> {
         self.allow_http = true;
-        self.http = build_client(true)?;
+        self.http = build_client(true, self.timeout, self.connect_timeout)?;
         Ok(self)
     }
 
@@ -471,5 +513,37 @@ mod tests {
             .await
             .expect_err("must not follow the redirect");
         assert!(matches!(error, TrustError::HttpStatus { code: 302 }));
+    }
+
+    #[tokio::test]
+    async fn gives_up_on_an_origin_slower_than_the_configured_timeout() {
+        // Client::new() leaves timeout/connect_timeout unset, so a slow
+        // origin would hang verify_describe indefinitely — and every
+        // concurrent caller queued behind it by the single-flight cache.
+        // with_timeout must make that fail closed instead.
+        let server = MockServer::start().await;
+        let did = did_for(&server);
+        Mock::given(method("GET"))
+            .and(path("/.well-known/did.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(document_body(did.as_str()))
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .mount(&server)
+            .await;
+
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .with_timeout(Duration::from_millis(20))
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
+
+        let error = resolver
+            .resolve(&did)
+            .await
+            .expect_err("times out before the origin responds");
+        assert!(matches!(error, TrustError::Fetch { .. }));
     }
 }
