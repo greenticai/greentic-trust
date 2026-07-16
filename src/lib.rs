@@ -6,10 +6,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cert;
 pub mod did;
 pub mod document;
 pub mod error;
 
+pub use cert::PublisherCert;
 pub use did::DidWeb;
 pub use document::TrustDocument;
 pub use error::TrustError;
