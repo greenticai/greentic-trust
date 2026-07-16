@@ -766,7 +766,7 @@ Create `src/cert.rs` containing only this test module for now:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone as _;
+    use super::fixtures::mint_cert;
     use ed25519_dalek::{Signer as _, SigningKey};
     use rand::rngs::OsRng;
 
@@ -776,17 +776,11 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    /// Mint a cert the way S2's ceremony and S3's issuer will.
+    /// Mint via the same `fixtures::mint_cert` that S2's ceremony, S3's issuer,
+    /// and Task 5's tests use. One definition of "how a cert is made": if the
+    /// fixture drifts from `signed_bytes`, these tests are what catches it.
     fn mint(root: &SigningKey, publisher: &VerifyingKey, not_after: &str) -> PublisherCert {
-        let mut cert = PublisherCert {
-            publisher_public_key: B64.encode(publisher.as_bytes()),
-            root_signature: String::new(),
-            key_id: Some("pk_test_1".to_owned()),
-            not_after: Some(not_after.to_owned()),
-        };
-        let signed = cert.signed_bytes().expect("builds signed bytes");
-        cert.root_signature = B64.encode(root.sign(&signed).to_bytes());
-        cert
+        mint_cert(root, publisher, "pk_test_1", not_after)
     }
 
     fn setup() -> (SigningKey, SigningKey, PublisherCert) {
@@ -1238,7 +1232,8 @@ git commit -m "feat: verify publisher certificates with signed expiry and domain
 - Consumes: `DidWeb` (Task 1), `TrustDocument` (Task 2), `TrustError` (Task 1).
 - Produces:
   - `greentic_trust::resolver::RootResolver` — `#[async_trait] pub trait RootResolver: Send + Sync { async fn resolve(&self, did: &DidWeb) -> Result<Arc<TrustDocument>, TrustError>; }`
-  - `greentic_trust::resolver::HttpResolver` with `HttpResolver::new(ttl: Duration, capacity: u64) -> Self` and `HttpResolver::allow_http(self) -> Self` (dev/test only).
+  - `greentic_trust::resolver::HttpResolver` with `HttpResolver::new(ttl: Duration, capacity: u64) -> Self`.
+  - `HttpResolver::allow_http(self) -> Self` — **gated `#[cfg(any(test, feature = "testing"))]`**. It disables the HTTPS requirement, which is the only thing making a fetched root key trustworthy, so a production build must not have it at all.
 
 - [ ] **Step 1: Add `async-trait` to `Cargo.toml`**
 
@@ -1444,8 +1439,13 @@ impl HttpResolver {
         }
     }
 
-    /// Permit plain HTTP. Development and tests only — this removes the only
-    /// thing making a fetched root key trustworthy.
+    /// Permit plain HTTP.
+    ///
+    /// Gated behind `test`/`testing`: HTTPS is the only thing making a fetched
+    /// root key trustworthy, so a production build must not even have this
+    /// method to call. The field stays unconditional and simply remains `false`
+    /// forever in a production build.
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn allow_http(mut self) -> Self {
         self.allow_http = true;
