@@ -156,6 +156,37 @@ mod tests {
         DidWeb::parse(&format!("did:web:{authority}")).expect("parses")
     }
 
+    /// Like [`did_for`], but namespaced under a path segment, so two DIDs can
+    /// share the mock server's host while resolving to different documents.
+    fn did_for_path(server: &MockServer, segment: &str) -> DidWeb {
+        let authority = server
+            .uri()
+            .trim_start_matches("http://")
+            .replace(':', "%3A");
+        DidWeb::parse(&format!("did:web:{authority}:{segment}")).expect("parses")
+    }
+
+    /// Like [`document_body`], but signed with a caller-supplied key instead of
+    /// a freshly generated, unrecoverable one, so a test can assert the
+    /// resolved document carries exactly that key back.
+    fn document_body_for_key(
+        did: &str,
+        verifying: &ed25519_dalek::VerifyingKey,
+    ) -> serde_json::Value {
+        let x = URL_SAFE_NO_PAD.encode(verifying.as_bytes());
+        serde_json::json!({
+            "@context": ["https://www.w3.org/ns/did/v1"],
+            "id": did,
+            "verificationMethod": [{
+                "id": format!("{did}#root-1"),
+                "type": "JsonWebKey2020",
+                "controller": did,
+                "publicKeyJwk": { "kty": "OKP", "crv": "Ed25519", "x": x, "use": "sig" },
+            }],
+            "assertionMethod": [format!("{did}#root-1")],
+        })
+    }
+
     #[tokio::test]
     async fn fetches_and_caches_a_document() {
         let server = MockServer::start().await;
@@ -262,5 +293,92 @@ mod tests {
 
         let error = resolver.resolve(&did).await.expect_err("rejects");
         assert!(matches!(error, TrustError::BindingMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn two_dids_on_one_host_do_not_collide() {
+        // `did:web:h:a` and `did:web:h:b` are different trust roots served
+        // from the same host. A host-keyed cache (the `JwksCache` bug this
+        // resolver exists to avoid) would let the second resolve return the
+        // first DID's document — a trust root substitution.
+        let server = MockServer::start().await;
+        let did_a = did_for_path(&server, "a");
+        let did_b = did_for_path(&server, "b");
+
+        let key_a = SigningKey::generate(&mut OsRng);
+        let key_b = SigningKey::generate(&mut OsRng);
+
+        Mock::given(method("GET"))
+            .and(path("/a/did.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(document_body_for_key(
+                    did_a.as_str(),
+                    &key_a.verifying_key(),
+                )),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b/did.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(document_body_for_key(
+                    did_b.as_str(),
+                    &key_b.verifying_key(),
+                )),
+            )
+            .mount(&server)
+            .await;
+
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+
+        let doc_a = resolver.resolve(&did_a).await.expect("resolves a");
+        let doc_b = resolver.resolve(&did_b).await.expect("resolves b");
+
+        let returned_a = doc_a.assertion_keys()[0].to_bytes();
+        let returned_b = doc_b.assertion_keys()[0].to_bytes();
+
+        assert_ne!(returned_a, returned_b);
+        assert_eq!(returned_a, key_a.verifying_key().to_bytes());
+        assert_eq!(returned_b, key_b.verifying_key().to_bytes());
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_collapse_into_one_request() {
+        // A burst of concurrent cache misses for the same DID must coalesce
+        // into a single origin request via `try_get_with`'s single-flight,
+        // rather than stampeding the origin the way an uncoordinated
+        // get-then-insert cache would.
+        let server = MockServer::start().await;
+        let did = did_for(&server);
+        Mock::given(method("GET"))
+            .and(path("/.well-known/did.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(document_body(did.as_str()))
+                    .set_delay(Duration::from_millis(100)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let resolver = resolver.clone();
+                let did = did.clone();
+                tokio::spawn(async move { resolver.resolve(&did).await })
+            })
+            .collect();
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await.expect("task panicked").expect("resolves"));
+        }
+
+        let first = &results[0];
+        for document in &results[1..] {
+            assert!(Arc::ptr_eq(first, document));
+        }
     }
 }
