@@ -37,18 +37,40 @@ pub struct HttpResolver {
     allow_http: bool,
 }
 
+/// Build the underlying `reqwest::Client`.
+///
+/// `https_only` is set from `!allow_http`, and redirects are always disabled:
+/// a did:web document lives at one static origin, so a 3xx response is never
+/// legitimate. Both properties must be enforced on the `Client` itself, not
+/// just on the initial URL string — a redirect hop is invisible to a check
+/// that only inspects the URL passed in.
+fn build_client(allow_http: bool) -> Result<reqwest::Client, TrustError> {
+    reqwest::Client::builder()
+        .https_only(!allow_http)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|source| TrustError::ClientBuild {
+            source: Arc::new(source),
+        })
+}
+
 impl HttpResolver {
     /// Build a resolver caching up to `capacity` documents for `ttl`.
-    #[must_use]
-    pub fn new(ttl: Duration, capacity: u64) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// [`TrustError::ClientBuild`] if the underlying HTTP client cannot be
+    /// constructed (TLS backend initialization failure). Not expected in
+    /// practice for this crate's configuration, but `reqwest` types this as
+    /// fallible and a production path must not paper over that with `unwrap`.
+    pub fn new(ttl: Duration, capacity: u64) -> Result<Self, TrustError> {
+        Ok(Self {
             cache: Cache::builder()
                 .max_capacity(capacity)
                 .time_to_live(ttl)
                 .build(),
-            http: reqwest::Client::new(),
+            http: build_client(false)?,
             allow_http: false,
-        }
+        })
     }
 
     /// Permit plain HTTP.
@@ -57,11 +79,19 @@ impl HttpResolver {
     /// root key trustworthy, so a production build must not even have this
     /// method to call. The field stays unconditional and simply remains `false`
     /// forever in a production build.
+    ///
+    /// Rebuilds the underlying client with `https_only(false)` — flipping just
+    /// the field without rebuilding would leave the still-`https_only(true)`
+    /// client refusing the very plain-HTTP requests this method exists to
+    /// allow.
+    ///
+    /// # Errors
+    /// [`TrustError::ClientBuild`], see [`Self::new`].
     #[cfg(any(test, feature = "testing"))]
-    #[must_use]
-    pub fn allow_http(mut self) -> Self {
+    pub fn allow_http(mut self) -> Result<Self, TrustError> {
         self.allow_http = true;
-        self
+        self.http = build_client(true)?;
+        Ok(self)
     }
 
     async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, TrustError> {
@@ -198,7 +228,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
 
         let first = resolver.resolve(&did).await.expect("resolves");
         let second = resolver.resolve(&did).await.expect("resolves");
@@ -223,7 +256,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
 
         let first = resolver.resolve(&did).await;
         assert!(matches!(first, Err(TrustError::HttpStatus { code: 503 })));
@@ -244,7 +280,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
 
         let error = resolver.resolve(&did).await.expect_err("rejects");
         assert!(matches!(error, TrustError::HttpStatus { code: 404 }));
@@ -255,7 +294,7 @@ mod tests {
         // `DidWeb` always derives an https:// URL, so the guard is reached only
         // via `allow_http`'s rewrite or a caller passing a URL in directly.
         // Exercise it at `fetch_bytes`, which is where the decision lives.
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16);
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16).expect("client builds");
 
         let error = resolver
             .fetch_bytes("http://trust.greentic.cloud/.well-known/did.json")
@@ -271,7 +310,10 @@ mod tests {
         // layer rather than with an HTTP status — this must surface as
         // `TrustError::Fetch`, not get flattened into `DocumentInvalid`.
         let did = DidWeb::parse("did:web:127.0.0.1%3A1").expect("parses");
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
 
         let error = resolver.resolve(&did).await.expect_err("rejects");
         assert!(matches!(error, TrustError::Fetch { .. }));
@@ -289,7 +331,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
 
         let error = resolver.resolve(&did).await.expect_err("rejects");
         assert!(matches!(error, TrustError::BindingMismatch { .. }));
@@ -329,7 +374,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
 
         let doc_a = resolver.resolve(&did_a).await.expect("resolves a");
         let doc_b = resolver.resolve(&did_b).await.expect("resolves b");
@@ -361,7 +409,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
 
         let handles: Vec<_> = (0..8)
             .map(|_| {
@@ -380,5 +431,45 @@ mod tests {
         for document in &results[1..] {
             assert!(Arc::ptr_eq(first, document));
         }
+    }
+
+    #[tokio::test]
+    async fn refuses_to_follow_a_redirect_to_another_origin() {
+        // A malicious or compromised intermediary 302s the well-known request
+        // to a second origin serving a document that *claims* the first
+        // origin's DID. `document.rs`'s binding check cannot catch this: it
+        // validates what the document claims, not where the bytes came from.
+        // Provenance is HTTPS-to-the-named-origin, and a redirect must never
+        // be followed across origins.
+        let victim = MockServer::start().await;
+        let attacker = MockServer::start().await;
+        let did = did_for(&victim);
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/did.json"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "Location",
+                format!("{}/.well-known/did.json", attacker.uri()),
+            ))
+            .mount(&victim)
+            .await;
+        // The attacker's document claims the victim's DID, so if the redirect
+        // were followed the binding check alone would not catch it.
+        Mock::given(method("GET"))
+            .and(path("/.well-known/did.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document_body(did.as_str())))
+            .mount(&attacker)
+            .await;
+
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16)
+            .expect("client builds")
+            .allow_http()
+            .expect("client builds");
+
+        let error = resolver
+            .resolve(&did)
+            .await
+            .expect_err("must not follow the redirect");
+        assert!(matches!(error, TrustError::HttpStatus { code: 302 }));
     }
 }

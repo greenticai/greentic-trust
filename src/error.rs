@@ -27,6 +27,12 @@ pub enum TrustError {
         source: Arc<reqwest::Error>,
     },
 
+    #[error("building the HTTP client failed: {source}")]
+    ClientBuild {
+        #[source]
+        source: Arc<reqwest::Error>,
+    },
+
     #[error("DID document request returned HTTP {code}")]
     HttpStatus { code: u16 },
 

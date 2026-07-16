@@ -29,7 +29,7 @@ use chrono::Utc;
 use greentic_trust::{DidWeb, HttpResolver, verify_describe};
 
 let did = DidWeb::parse("did:web:trust.greentic.cloud")?;
-let resolver = HttpResolver::new(Duration::from_secs(600), 16);
+let resolver = HttpResolver::new(Duration::from_secs(600), 16)?;
 let publisher_key = verify_describe(&describe, &did, &resolver, Utc::now()).await?;
 ```
 
