@@ -1,0 +1,38 @@
+[package]
+name = "greentic-trust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "did:web trust root and publisher certificate verification for Greentic"
+repository = "https://github.com/greenticai/greentic-trust"
+
+[features]
+default = []
+# Exposes fixture helpers (root keypair generation, cert minting) to downstream crates.
+testing = ["dep:rand"]
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+moka = { version = "0.12", features = ["future"] }
+rand = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_jcs = "0.1"
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+rand = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

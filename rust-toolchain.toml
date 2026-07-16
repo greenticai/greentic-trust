@@ -1,0 +1,6 @@
+# Canonical toolchain for Greentic Rust repos.
+# Do not edit per-repo.
+
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
