@@ -52,6 +52,16 @@ sign something production accepts.
 bash ci/local_check.sh
 ```
 
+## Ceremony
+
+Generating and publishing a root is documented in
+[`docs/runbooks/root-ceremony.md`](docs/runbooks/root-ceremony.md). The tool:
+
+    cargo build --features cli
+    greentic-trust gen-root         # generate a root keypair
+    greentic-trust build-doc ...    # build the did.json
+    greentic-trust verify-doc ...   # confirm a publish
+
 ## Design
 
 `docs/superpowers/specs/2026-07-16-did-web-trust-root-design.md`
