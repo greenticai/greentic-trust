@@ -1,0 +1,180 @@
+//! Ceremony operations: generate a root key and build the did.json document.
+//!
+//! Always compiled, because these define the *mint* side of the same wire
+//! format the rest of the crate verifies. `build_document` produces exactly the
+//! bytes [`crate::document::TrustDocument::parse`] accepts, and a round-trip
+//! test pins that — co-locating build and parse in one crate is what keeps them
+//! from drifting.
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use serde_json::json;
+
+use crate::did::DidWeb;
+use crate::error::TrustError;
+
+/// Generate a root signing key from a caller-supplied RNG.
+///
+/// The binary passes `OsRng`; tests pass a seeded RNG for determinism. Taking
+/// the RNG as a parameter keeps this function free of the `rand` crate, so the
+/// library's consumers never pull it in.
+#[must_use]
+pub fn generate_root<R: rand_core::CryptoRngCore + ?Sized>(rng: &mut R) -> SigningKey {
+    SigningKey::generate(rng)
+}
+
+/// Build the `did.json` document for `did`, carrying one or more root keys.
+///
+/// More than one key appears only during a root-rotation overlap, so an old and
+/// a new root are both valid while the TTL drains. Each key becomes one
+/// `verificationMethod` with id `{did}#root-{n}` (n from 1) and one
+/// `assertionMethod` reference — the two members the verifier reads — with a JWK
+/// of `kty=OKP, crv=Ed25519, x=URL_SAFE_NO_PAD(pubkey)`.
+///
+/// # Errors
+/// [`TrustError::DocumentInvalid`] if `roots` is empty.
+pub fn build_document(
+    did: &DidWeb,
+    roots: &[VerifyingKey],
+) -> Result<serde_json::Value, TrustError> {
+    if roots.is_empty() {
+        return Err(TrustError::DocumentInvalid {
+            reason: "build_document requires at least one root key".to_owned(),
+        });
+    }
+
+    let id = did.as_str();
+    let mut methods = Vec::with_capacity(roots.len());
+    let mut assertions = Vec::with_capacity(roots.len());
+
+    for (index, root) in roots.iter().enumerate() {
+        let kid = format!("{id}#root-{}", index + 1);
+        methods.push(json!({
+            "id": kid,
+            "type": "JsonWebKey2020",
+            "controller": id,
+            "publicKeyJwk": {
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": URL_SAFE_NO_PAD.encode(root.as_bytes()),
+                "use": "sig",
+            },
+        }));
+        assertions.push(json!(kid));
+    }
+
+    Ok(json!({
+        "@context": [
+            "https://www.w3.org/ns/did/v1",
+            "https://w3id.org/security/suites/jws-2020/v1",
+        ],
+        "id": id,
+        "verificationMethod": methods,
+        "assertionMethod": assertions,
+        "authentication": assertions,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::did::DidWeb;
+    use crate::document::TrustDocument;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use rand::rngs::StdRng;
+    use rand::SeedableRng as _;
+
+    const DID: &str = "did:web:trust.research.greentic.cloud";
+
+    fn seeded_root(seed: u8) -> ed25519_dalek::SigningKey {
+        let mut rng = StdRng::from_seed([seed; 32]);
+        generate_root(&mut rng)
+    }
+
+    #[test]
+    fn built_document_round_trips_through_the_verifier() {
+        // The anti-drift guarantee: the bytes build_document emits are parsed by
+        // the same TrustDocument the runner uses at runtime. If they diverge,
+        // this test is red — not production.
+        let root = seeded_root(1);
+        let did = DidWeb::parse(DID).expect("parses");
+
+        let doc = build_document(&did, &[root.verifying_key()]).expect("builds");
+        let bytes = serde_json::to_vec(&doc).expect("serializes");
+        let parsed = TrustDocument::parse(&did, &bytes).expect("verifier accepts it");
+
+        assert_eq!(parsed.assertion_keys().len(), 1);
+        assert_eq!(
+            parsed.assertion_keys()[0].as_bytes(),
+            root.verifying_key().as_bytes()
+        );
+    }
+
+    #[test]
+    fn built_document_id_equals_the_did() {
+        let root = seeded_root(2);
+        let did = DidWeb::parse(DID).expect("parses");
+        let doc = build_document(&did, &[root.verifying_key()]).expect("builds");
+        assert_eq!(doc["id"], serde_json::json!(DID));
+    }
+
+    #[test]
+    fn multi_key_document_carries_every_root() {
+        // Used only during a root-rotation overlap: old + new root both valid.
+        let a = seeded_root(3);
+        let b = seeded_root(4);
+        let did = DidWeb::parse(DID).expect("parses");
+
+        let doc = build_document(&did, &[a.verifying_key(), b.verifying_key()]).expect("builds");
+        let bytes = serde_json::to_vec(&doc).expect("serializes");
+        let parsed = TrustDocument::parse(&did, &bytes).expect("verifier accepts it");
+
+        assert_eq!(parsed.assertion_keys().len(), 2);
+        let keys: Vec<_> = parsed
+            .assertion_keys()
+            .iter()
+            .map(|k| *k.as_bytes())
+            .collect();
+        assert!(keys.contains(&a.verifying_key().to_bytes()));
+        assert!(keys.contains(&b.verifying_key().to_bytes()));
+    }
+
+    #[test]
+    fn jwk_x_is_base64url_not_standard() {
+        // Interop discipline: JWK x is URL_SAFE_NO_PAD. Pick a key whose two
+        // encodings actually differ, so a STANDARD mutation is caught rather
+        // than silently agreeing. Search seeds until the encodings diverge.
+        let (root, x_url) = (0u8..=255)
+            .find_map(|s| {
+                let root = seeded_root(s);
+                let bytes = root.verifying_key().to_bytes();
+                let url = URL_SAFE_NO_PAD.encode(bytes);
+                let std = STANDARD.encode(bytes);
+                (url != std).then_some((root, url))
+            })
+            .expect("some key encodes differently under the two alphabets");
+        let did = DidWeb::parse(DID).expect("parses");
+
+        let doc = build_document(&did, &[root.verifying_key()]).expect("builds");
+        assert_eq!(
+            doc["verificationMethod"][0]["publicKeyJwk"]["x"],
+            serde_json::json!(x_url)
+        );
+    }
+
+    #[test]
+    fn empty_roots_is_rejected() {
+        let did = DidWeb::parse(DID).expect("parses");
+        let error = build_document(&did, &[]).expect_err("rejects");
+        assert!(matches!(error, TrustError::DocumentInvalid { .. }));
+    }
+
+    #[test]
+    fn generate_root_is_deterministic_for_a_fixed_seed() {
+        // Same seed -> same key; different seed -> different key. Asserting an
+        // exact hardcoded x would be fragile against StdRng algorithm changes.
+        assert_eq!(seeded_root(9).to_bytes(), seeded_root(9).to_bytes());
+        assert_ne!(seeded_root(9).to_bytes(), seeded_root(10).to_bytes());
+    }
+}

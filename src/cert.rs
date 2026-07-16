@@ -174,7 +174,7 @@ pub mod fixtures {
     /// Generate a root keypair for tests.
     #[must_use]
     pub fn root_keypair() -> SigningKey {
-        SigningKey::generate(&mut rand::rngs::OsRng)
+        crate::ceremony::generate_root(&mut rand::rngs::OsRng)
     }
 
     /// Mint a cert the way S2's ceremony and S3's issuer will.

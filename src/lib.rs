@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ceremony;
 pub mod cert;
 pub mod chain;
 pub mod did;
