@@ -5,6 +5,13 @@
 //! bytes [`crate::document::TrustDocument::parse`] accepts, and a round-trip
 //! test pins that — co-locating build and parse in one crate is what keeps them
 //! from drifting.
+//!
+//! Note for S3: cert *minting* (`mint_cert`) has NOT graduated here yet — it
+//! still lives in `cert::fixtures` behind `#[cfg(any(test, feature = "testing"))]`.
+//! S2 did not need it, and graduating it means changing its signature to return
+//! `Result` (no `expect` in a production path), which would churn S1's merged
+//! tests. When store-server needs to issue certs in production, move it here and
+//! make that change then.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -64,6 +71,10 @@ pub fn build_document(
         assertions.push(json!(kid));
     }
 
+    // Only `assertionMethod`: a root key exists to sign publisher certs, which
+    // is an assertion. It is deliberately NOT in `authentication` — that
+    // relationship proves control *as the DID subject*, a capability a signing
+    // root has no business advertising to a third-party did:web resolver.
     Ok(json!({
         "@context": [
             "https://www.w3.org/ns/did/v1",
@@ -72,7 +83,6 @@ pub fn build_document(
         "id": id,
         "verificationMethod": methods,
         "assertionMethod": assertions,
-        "authentication": assertions,
     }))
 }
 
