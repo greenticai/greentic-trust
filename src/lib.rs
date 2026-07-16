@@ -7,12 +7,14 @@
 #![forbid(unsafe_code)]
 
 pub mod cert;
+pub mod chain;
 pub mod did;
 pub mod document;
 pub mod error;
 pub mod resolver;
 
 pub use cert::PublisherCert;
+pub use chain::verify_describe;
 pub use did::DidWeb;
 pub use document::TrustDocument;
 pub use error::TrustError;
