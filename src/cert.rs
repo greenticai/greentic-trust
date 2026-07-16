@@ -389,6 +389,7 @@ mod tests {
         let (_root, _publisher, cert) = setup();
         let bytes = cert.signed_bytes().expect("builds");
         assert!(bytes.starts_with(CERT_DOMAIN_V1));
+        assert_eq!(CERT_DOMAIN_V1, b"greentic-publisher-cert-v1\x00");
     }
 
     #[test]
