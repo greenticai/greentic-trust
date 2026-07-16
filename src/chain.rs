@@ -10,9 +10,18 @@
 //! 5. Check the cert vouches for the key that actually signed.
 //! 6. Verify the describe signature with that key.
 //!
-//! Steps 3–4 live inside [`PublisherCert::verify`]. Step 5 is the one that
-//! carries the chain: without it, a genuine cert for one publisher can be
-//! attached to an artifact signed by anybody.
+//! Steps 3–4 live inside [`PublisherCert::verify`]. The invariant that must
+//! never be relaxed is step 6: it verifies against `certified_key`, the key
+//! the cert vouches for, never against the describe's self-asserted
+//! `signature.publicKey`. That is what closes the hole Greentic's SDK has —
+//! the SDK verifies against the self-asserted key, so a genuine cert for one
+//! publisher can be attached to an artifact signed by anybody. Step 5 is
+//! defense in depth: it catches the very same substitution one step earlier
+//! and turns it into a precise [`TrustError::CertKeyMismatch`] naming both
+//! keys, instead of letting it fall through to a generic
+//! [`TrustError::DescribeSignatureInvalid`] out of step 6. The redundancy
+//! between them is deliberate, not accidental — each is independently
+//! sufficient to catch the attack.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -38,19 +47,30 @@ pub async fn verify_describe(
     resolver: &dyn RootResolver,
     now: DateTime<Utc>,
 ) -> Result<VerifyingKey, TrustError> {
+    // 0. `describe` must be a JSON object before anything else can be read
+    //    from or removed out of it.
+    describe
+        .as_object()
+        .ok_or_else(|| TrustError::CertInvalid {
+            reason: "describe is not a JSON object".to_owned(),
+        })?;
+
     // 1. Signature block.
     let signature_object = describe
         .get("signature")
         .ok_or(TrustError::SignatureBlockMissing)?;
 
-    let algorithm = signature_object
-        .get("algorithm")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("ed25519");
+    let algorithm = match signature_object.get("algorithm") {
+        None => "ed25519".to_owned(),
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| TrustError::UnsupportedAlgorithm {
+                alg: value.to_string(),
+            })?
+            .to_owned(),
+    };
     if !algorithm.eq_ignore_ascii_case("ed25519") {
-        return Err(TrustError::UnsupportedAlgorithm {
-            alg: algorithm.to_owned(),
-        });
+        return Err(TrustError::UnsupportedAlgorithm { alg: algorithm });
     }
 
     let signing_key_b64 = signature_object
@@ -94,13 +114,12 @@ pub async fn verify_describe(
     // 6. The describe signature itself.
     //    Signed bytes are the describe minus `signature`, JCS-canonicalized —
     //    identical to what store-server signs and what the runner reconstructs.
+    //    `describe` was already proven to be a JSON object in step 0, so this
+    //    clone is always `Value::Object` too.
     let mut unsigned = describe.clone();
-    unsigned
-        .as_object_mut()
-        .ok_or_else(|| TrustError::CertInvalid {
-            reason: "describe is not a JSON object".to_owned(),
-        })?
-        .remove("signature");
+    if let Some(object) = unsigned.as_object_mut() {
+        object.remove("signature");
+    }
     let message = serde_jcs::to_vec(&unsigned).map_err(|source| TrustError::Canonicalize {
         source: std::sync::Arc::new(source),
     })?;
@@ -376,5 +395,69 @@ mod tests {
         .expect_err("rejects");
 
         assert!(matches!(error, TrustError::CertSignatureInvalid));
+    }
+
+    #[tokio::test]
+    async fn rejects_an_expired_cert_using_the_caller_supplied_now() {
+        // The cert expires 2030-01-01. Passing a `now` from *after* that date
+        // can only happen because `now` is threaded in by the caller, never
+        // read off the wall clock inside the crate — a real `Utc::now()` call
+        // here could not produce a future timestamp. This is what pins step
+        // 4's expiry delegation and the "no Utc::now() inside the crate"
+        // constraint at this layer.
+        let root = root_keypair();
+        let publisher = SigningKey::generate(&mut OsRng);
+        let cert = mint_cert(
+            &root,
+            &publisher.verifying_key(),
+            "pk_1",
+            "2030-01-01T00:00:00Z",
+        );
+        let describe = sign_describe(&publisher, &cert, None);
+        let did = DidWeb::parse(TRUSTED).expect("parses");
+
+        let error = verify_describe(
+            &describe,
+            &did,
+            &resolver_for(&root),
+            at("2031-01-01T00:00:00Z"),
+        )
+        .await
+        .expect_err("rejects");
+
+        assert!(matches!(error, TrustError::CertExpired { .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_non_string_algorithm() {
+        let root = root_keypair();
+        let publisher = SigningKey::generate(&mut OsRng);
+        let cert = mint_cert(
+            &root,
+            &publisher.verifying_key(),
+            "pk_1",
+            "2030-01-01T00:00:00Z",
+        );
+        let describe = serde_json::json!({
+            "metadata": { "id": "acme.widget", "version": "1.0.0" },
+            "signature": {
+                "algorithm": 42,
+                "publicKey": B64.encode(publisher.verifying_key().as_bytes()),
+                "value": B64.encode([0_u8; 64]),
+                "certificate": serde_json::to_value(&cert).expect("serializes"),
+            },
+        });
+        let did = DidWeb::parse(TRUSTED).expect("parses");
+
+        let error = verify_describe(
+            &describe,
+            &did,
+            &resolver_for(&root),
+            at("2026-07-16T00:00:00Z"),
+        )
+        .await
+        .expect_err("rejects");
+
+        assert!(matches!(error, TrustError::UnsupportedAlgorithm { .. }));
     }
 }
