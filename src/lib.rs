@@ -10,8 +10,10 @@ pub mod cert;
 pub mod did;
 pub mod document;
 pub mod error;
+pub mod resolver;
 
 pub use cert::PublisherCert;
 pub use did::DidWeb;
 pub use document::TrustDocument;
 pub use error::TrustError;
+pub use resolver::{HttpResolver, RootResolver};
