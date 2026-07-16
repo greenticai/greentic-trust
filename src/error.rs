@@ -69,6 +69,9 @@ pub enum TrustError {
     #[error("publisher certificate is malformed: {reason}")]
     CertInvalid { reason: String },
 
+    #[error("describe is malformed: {reason}")]
+    DescribeInvalid { reason: String },
+
     #[error("publisher certificate is not signed by any trusted root")]
     CertSignatureInvalid,
 

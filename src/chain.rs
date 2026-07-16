@@ -51,7 +51,7 @@ pub async fn verify_describe(
     //    from or removed out of it.
     describe
         .as_object()
-        .ok_or_else(|| TrustError::CertInvalid {
+        .ok_or_else(|| TrustError::DescribeInvalid {
             reason: "describe is not a JSON object".to_owned(),
         })?;
 
@@ -76,13 +76,13 @@ pub async fn verify_describe(
     let signing_key_b64 = signature_object
         .get("publicKey")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| TrustError::CertInvalid {
+        .ok_or_else(|| TrustError::DescribeInvalid {
             reason: "signature.publicKey missing or not a string".to_owned(),
         })?;
     let signature_b64 = signature_object
         .get("value")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| TrustError::CertInvalid {
+        .ok_or_else(|| TrustError::DescribeInvalid {
             reason: "signature.value missing or not a string".to_owned(),
         })?;
 
@@ -135,16 +135,16 @@ pub async fn verify_describe(
 fn decode_signing_key(encoded: &str) -> Result<VerifyingKey, TrustError> {
     let raw = B64
         .decode(encoded.trim())
-        .map_err(|e| TrustError::CertInvalid {
+        .map_err(|e| TrustError::DescribeInvalid {
             reason: format!("signature.publicKey is not base64: {e}"),
         })?;
     let bytes: [u8; 32] = raw
         .as_slice()
         .try_into()
-        .map_err(|_| TrustError::CertInvalid {
+        .map_err(|_| TrustError::DescribeInvalid {
             reason: format!("signature.publicKey is {} bytes, expected 32", raw.len()),
         })?;
-    VerifyingKey::from_bytes(&bytes).map_err(|e| TrustError::CertInvalid {
+    VerifyingKey::from_bytes(&bytes).map_err(|e| TrustError::DescribeInvalid {
         reason: format!("signature.publicKey is not a valid Ed25519 key: {e}"),
     })
 }
@@ -152,13 +152,13 @@ fn decode_signing_key(encoded: &str) -> Result<VerifyingKey, TrustError> {
 fn decode_signature(encoded: &str) -> Result<Signature, TrustError> {
     let raw = B64
         .decode(encoded.trim())
-        .map_err(|e| TrustError::CertInvalid {
+        .map_err(|e| TrustError::DescribeInvalid {
             reason: format!("signature.value is not base64: {e}"),
         })?;
     let bytes: [u8; 64] = raw
         .as_slice()
         .try_into()
-        .map_err(|_| TrustError::CertInvalid {
+        .map_err(|_| TrustError::DescribeInvalid {
             reason: format!("signature.value is {} bytes, expected 64", raw.len()),
         })?;
     Ok(Signature::from_bytes(&bytes))
@@ -459,5 +459,23 @@ mod tests {
         .expect_err("rejects");
 
         assert!(matches!(error, TrustError::UnsupportedAlgorithm { .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_non_object_describe() {
+        let root = root_keypair();
+        let describe = serde_json::json!(["not", "an", "object"]);
+        let did = DidWeb::parse(TRUSTED).expect("parses");
+
+        let error = verify_describe(
+            &describe,
+            &did,
+            &resolver_for(&root),
+            at("2026-07-16T00:00:00Z"),
+        )
+        .await
+        .expect_err("rejects");
+
+        assert!(matches!(error, TrustError::DescribeInvalid { .. }));
     }
 }
