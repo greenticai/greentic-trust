@@ -117,8 +117,14 @@ below `1.2.0-0`. Landing S1 there drags it behind an unrelated blocker. A standa
 on its own cadence.
 
 Dependency direction is one-way: `runner → greentic-trust`, `sdk → greentic-trust`,
-`store-server → greentic-trust`. `PublisherCert` **moves** here from
-`greentic-extension-sdk-contract`; the SDK re-exports it so existing consumers keep compiling.
+`store-server → greentic-trust`.
+
+**`PublisherCert` is re-authored here, not moved — and the SDK's copy stays untouched in S1.**
+A move would require the SDK to depend on `greentic-trust`, which cannot happen until the crate is
+published; S1 would be unable to land without breaking the SDK. So S1 owns the canonical type from
+the start, and the SDK's copy becomes vestigial: **nothing issues certs today**, so that copy is
+exercised only by its own unit tests and is dead in every deployment. S5 deletes it and re-points
+the SDK. The duplication is one slice long and one of the two sides is provably unreachable.
 
 ## Architecture
 
@@ -202,6 +208,24 @@ Three points, each load-bearing:
   a permanent grant, which is exactly what revocation-by-expiry depends on not existing. The type
   moves as-is for compatibility; the *verifier* is what enforces presence.
 
+### This replaces the current cert scheme, and that is free
+
+`PublisherCert::verify` today signs the **raw 32-byte publisher key and nothing else**:
+
+```rust
+root.verify_strict(publisher_key.as_bytes(), &signature)
+```
+
+So `keyId` and `notAfter` sit outside the signed bytes and can be edited at will — the exact attack
+the "expiry is signed" requirement above exists to stop. The doc comment even concedes it:
+*"`not_after` is not enforced here; expiry is the caller's responsibility."* No caller enforces it,
+because no caller exists.
+
+That is what makes the change free: **no `PublisherCert` has ever been issued.** Nothing in
+`store-server` mints one — no migration, no handler, no OpenAPI schema. There are no certs in the
+wild to break, so S1 changes the signed-bytes format outright rather than versioning around it.
+The `v1` in the domain-separation prefix starts here.
+
 ## Verification order
 
 Ordered for security, not for cost. Every step fails closed.
@@ -226,9 +250,21 @@ attacker-supplied key unconditionally.
 
 ### Time is a parameter
 
-`verify(..., now: OffsetDateTime)`. Never `SystemTime::now()` internally. This makes expiry testable
-without waiting, and keeps the crate usable from WASM and Cloudflare Workers, which have no ambient
-clock. The tenant-manager platform plan takes a caller-supplied `now` for the same reason.
+`verify(..., now: chrono::DateTime<Utc>)`. Never `SystemTime::now()` internally. This makes expiry
+testable without waiting, and keeps the crate usable from WASM and Cloudflare Workers, which have no
+ambient clock. The tenant-manager platform plan takes a caller-supplied `now` for the same reason.
+
+`chrono`, not `time` — it is what `publisher_cert.rs` already uses and what the workspace already
+carries.
+
+### Expiry is strict at the boundary
+
+Valid iff `now < notAfter`. At exactly `notAfter` the cert is **expired**.
+
+This changes the existing behaviour. `publisher_cert.rs` computes `is_expired` as `now > expiry`,
+and `cert_expiry_boundary_is_inclusive` asserts that a cert exactly at `notAfter` is still valid.
+The difference is one second of a months-long window and nothing depends on it, so it goes the
+fail-closed way. That test is rewritten as part of the move rather than left contradicting the spec.
 
 ### There is no `Skipped` variant
 
