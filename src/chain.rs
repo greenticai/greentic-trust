@@ -478,4 +478,73 @@ mod tests {
 
         assert!(matches!(error, TrustError::DescribeInvalid { .. }));
     }
+
+    #[tokio::test]
+    async fn rejects_an_unsupported_algorithm_string() {
+        let root = root_keypair();
+        let publisher = SigningKey::generate(&mut OsRng);
+        let cert = mint_cert(
+            &root,
+            &publisher.verifying_key(),
+            "pk_1",
+            "2030-01-01T00:00:00Z",
+        );
+        let describe = serde_json::json!({
+            "metadata": { "id": "acme.widget", "version": "1.0.0" },
+            "signature": {
+                "algorithm": "rsa",
+                "publicKey": B64.encode(publisher.verifying_key().as_bytes()),
+                "value": B64.encode([0_u8; 64]),
+                "certificate": serde_json::to_value(&cert).expect("serializes"),
+            },
+        });
+        let did = DidWeb::parse(TRUSTED).expect("parses");
+
+        let error = verify_describe(
+            &describe,
+            &did,
+            &resolver_for(&root),
+            at("2026-07-16T00:00:00Z"),
+        )
+        .await
+        .expect_err("rejects");
+
+        assert!(matches!(error, TrustError::UnsupportedAlgorithm { .. }));
+    }
+
+    /// A resolver that always fails, to prove `verify_describe` propagates a
+    /// resolver error rather than falling through to some other outcome.
+    struct FailingResolver;
+
+    #[async_trait::async_trait]
+    impl RootResolver for FailingResolver {
+        async fn resolve(&self, _did: &DidWeb) -> Result<Arc<TrustDocument>, TrustError> {
+            Err(TrustError::HttpStatus { code: 503 })
+        }
+    }
+
+    #[tokio::test]
+    async fn propagates_a_resolver_error() {
+        let root = root_keypair();
+        let publisher = SigningKey::generate(&mut OsRng);
+        let cert = mint_cert(
+            &root,
+            &publisher.verifying_key(),
+            "pk_1",
+            "2030-01-01T00:00:00Z",
+        );
+        let describe = sign_describe(&publisher, &cert, None);
+        let did = DidWeb::parse(TRUSTED).expect("parses");
+
+        let error = verify_describe(
+            &describe,
+            &did,
+            &FailingResolver,
+            at("2026-07-16T00:00:00Z"),
+        )
+        .await
+        .expect_err("rejects");
+
+        assert!(matches!(error, TrustError::HttpStatus { code: 503 }));
+    }
 }
