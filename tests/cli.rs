@@ -64,3 +64,90 @@ fn gen_root_puts_the_public_key_and_warning_on_stderr_not_stdout() {
         "stderr carries the public key derived from the private seed"
     );
 }
+
+use std::io::Write as _;
+
+/// Run gen-root and return (`private_seed_b64`, `public_x_b64url`).
+fn fresh_root() -> (String, String) {
+    let output = bin()
+        .arg("gen-root")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let private = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    let seed: [u8; 32] = STANDARD.decode(&private).unwrap().try_into().unwrap();
+    let x = URL_SAFE_NO_PAD.encode(
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes(),
+    );
+    (private, x)
+}
+
+#[test]
+fn build_doc_then_verify_doc_file_accepts_the_matching_root() {
+    let did = "did:web:trust.research.greentic.cloud";
+    let (_private, x) = fresh_root();
+
+    let built = bin()
+        .args(["build-doc", "--did", did, "--root-public", &x])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let doc = built.stdout;
+
+    let mut file = tempfile::NamedTempFile::new().expect("temp file");
+    file.write_all(&doc).expect("write doc");
+
+    bin()
+        .args(["verify-doc", "--did", did, "--expected-root", &x, "--file"])
+        .arg(file.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn verify_doc_file_rejects_a_wrong_expected_root() {
+    let did = "did:web:trust.research.greentic.cloud";
+    let (_p1, published_x) = fresh_root();
+    let (_p2, other_x) = fresh_root();
+
+    let built = bin()
+        .args(["build-doc", "--did", did, "--root-public", &published_x])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let mut file = tempfile::NamedTempFile::new().expect("temp file");
+    file.write_all(&built.stdout).expect("write doc");
+
+    bin()
+        .args([
+            "verify-doc",
+            "--did",
+            did,
+            "--expected-root",
+            &other_x,
+            "--file",
+        ])
+        .arg(file.path())
+        .assert()
+        .failure();
+}
+
+#[test]
+fn build_doc_rejects_a_malformed_did() {
+    bin()
+        .args([
+            "build-doc",
+            "--did",
+            "did:key:z6MkExample",
+            "--root-public",
+            "AAAA",
+        ])
+        .assert()
+        .failure();
+}
