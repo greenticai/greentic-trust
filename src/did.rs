@@ -29,12 +29,9 @@ impl DidWeb {
                 input: input.to_owned(),
             })?;
 
-        let mut segments = rest.split(':');
-        let Some(host_raw) = segments.next() else {
-            return Err(TrustError::DidParse {
-                input: input.to_owned(),
-                reason: "empty method-specific identifier".to_owned(),
-            });
+        let (host_raw, path_raw) = match rest.split_once(':') {
+            Some((host, path)) => (host, Some(path)),
+            None => (rest, None),
         };
         let host = decode_host(host_raw).map_err(|reason| TrustError::DidParse {
             input: input.to_owned(),
@@ -42,13 +39,15 @@ impl DidWeb {
         })?;
 
         let mut path = String::new();
-        for segment in segments {
-            validate_path_segment(segment).map_err(|reason| TrustError::DidParse {
-                input: input.to_owned(),
-                reason,
-            })?;
-            path.push('/');
-            path.push_str(segment);
+        if let Some(path_raw) = path_raw {
+            for segment in path_raw.split(':') {
+                validate_path_segment(segment).map_err(|reason| TrustError::DidParse {
+                    input: input.to_owned(),
+                    reason,
+                })?;
+                path.push('/');
+                path.push_str(segment);
+            }
         }
 
         let url = if path.is_empty() {
