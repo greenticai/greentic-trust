@@ -24,6 +24,28 @@
 - Base64: **`STANDARD`** for cert/signature fields (matches store-server and the runner). **`URL_SAFE_NO_PAD`** for JWK `x` members (RFC 7515 §2 / RFC 8037). Mixing these silently breaks interop — the two encodings agree on most bytes and diverge on a few.
 - Time is always a caller-supplied `chrono::DateTime<Utc>` parameter. Never call `Utc::now()` inside the crate.
 
+## Mutation Check Protocol
+
+Several tasks end with a mutation check: break the invariant on purpose and confirm the test that
+claims to guard it actually goes red. A test whose invariant survives its own mutation is not a test.
+
+**Stage the file before mutating it.** Every task here creates a *new* file, and `git diff --stat`
+over an untracked file is **always empty** — so the "MUST be non-empty" guard would pass no matter
+what, which is the exact false-negative the guard exists to prevent. The protocol:
+
+```bash
+git add <file>             # give the diff a baseline; the correct version is now the index
+# ...apply the mutation...
+git diff --stat            # MUST be non-empty — worktree vs index. If empty, the mutation didn't land
+cargo test --lib <module>  # the named test MUST fail
+git checkout <file>        # restore from the index
+cargo test --lib <module>  # confirm green again
+```
+
+The `git diff --stat` guard matters because a mutation landing on a line `cargo fmt` reflows can
+become a no-op, and a no-op reads exactly like a surviving test. Report the real output of every
+step — "the check passed" without the output is not evidence.
+
 ---
 
 ### Task 1: Repo skeleton, error enum, and `did` parsing
@@ -1192,25 +1214,35 @@ Expected: PASS — 13 tests, no clippy warnings. Delete any import clippy report
 
 - [ ] **Step 6: Verify the domain prefix actually discriminates**
 
-Change `CERT_DOMAIN_V1` to `b""`, then:
+Follow the Mutation Check Protocol in Global Constraints — `git add src/cert.rs` FIRST, or the guard is vacuous.
+
+Mutation: change `CERT_DOMAIN_V1` to `b""`.
 
 ```bash
+git add src/cert.rs
+# apply the mutation
 git diff --stat            # MUST be non-empty
+cargo test --lib cert
+git checkout src/cert.rs
 cargo test --lib cert
 ```
 
-Expected: `rejects_a_root_signature_that_omits_the_domain_prefix` FAILS. Restore with `git checkout src/cert.rs` and re-run to confirm PASS.
+Expected: `rejects_a_root_signature_that_omits_the_domain_prefix` FAILS under the mutation, and passes again after restore.
 
 - [ ] **Step 7: Verify the expiry boundary actually discriminates**
 
-Change `if now >= expiry` to `if now > expiry`, then:
+Same protocol. Mutation: change `if now >= expiry` to `if now > expiry`.
 
 ```bash
+git add src/cert.rs
+# apply the mutation
 git diff --stat            # MUST be non-empty
+cargo test --lib cert
+git checkout src/cert.rs
 cargo test --lib cert
 ```
 
-Expected: `treats_a_cert_exactly_at_not_after_as_expired` FAILS. Restore and re-run to confirm PASS.
+Expected: `treats_a_cert_exactly_at_not_after_as_expired` FAILS under the mutation, and passes again after restore. This is the one-second boundary the spec deliberately sent the fail-closed way, so it is worth proving rather than assuming.
 
 - [ ] **Step 8: Commit**
 
@@ -1523,21 +1555,20 @@ Expected: PASS — 5 tests.
 
 - [ ] **Step 7: Verify the no-error-caching test actually discriminates**
 
-Replace `try_get_with` with a get-then-insert that caches errors:
+Follow the Mutation Check Protocol in Global Constraints — `git add src/resolver.rs` FIRST, or the guard is vacuous.
 
-```rust
-if let Some(hit) = self.cache.get(&key).await {
-    return Ok(hit);
-}
-```
-...followed by an unconditional `self.cache.insert(key, value).await` on both paths. Then:
+Mutation: replace `try_get_with` with a get-then-insert that caches errors — `if let Some(hit) = self.cache.get(&key).await { return Ok(hit); }`, followed by an unconditional `self.cache.insert(key, value).await` that runs on the error path too.
 
 ```bash
+git add src/resolver.rs
+# apply the mutation
 git diff --stat            # MUST be non-empty
+cargo test --lib resolver
+git checkout src/resolver.rs
 cargo test --lib resolver
 ```
 
-Expected: `does_not_cache_failures` FAILS. Restore with `git checkout src/resolver.rs` and re-run to confirm PASS.
+Expected: `does_not_cache_failures` FAILS under the mutation, and passes again after restore.
 
 - [ ] **Step 8: Commit**
 
@@ -1968,7 +1999,11 @@ Expected: PASS — all tests across the five modules.
 
 - [ ] **Step 6: Verify step 5 actually discriminates**
 
-This is the single most important check in the plan. Comment out the `if certified_key.as_bytes() != signing_key.as_bytes()` block, and change the step-6 verification to use `signing_key` instead of `certified_key`:
+This is the single most important check in the plan — it is the one proving the attack the whole chain exists to stop is actually caught. Follow the Mutation Check Protocol in Global Constraints; `git add src/chain.rs` FIRST, or the guard is vacuous.
+
+Mutation, BOTH edits together:
+1. Comment out the `if certified_key.as_bytes() != signing_key.as_bytes()` block.
+2. Change the step-6 verification to use `signing_key` instead of `certified_key`:
 
 ```rust
 signing_key
@@ -1976,14 +2011,18 @@ signing_key
     .map_err(|_| TrustError::DescribeSignatureInvalid)?;
 ```
 
-(Both edits are needed: leaving step 6 on `certified_key` would make the attack fail at step 6 for the wrong reason, which would mask that step 5 is gone.)
+Both are needed. Removing only the step-5 block leaves step 6 verifying against `certified_key`, so the attacker-signed describe still fails — at step 6, for the wrong reason. The test would stay green and you would wrongly conclude step 5 is load-bearing when you had just deleted it. That false pass is precisely what this check must not produce.
 
 ```bash
+git add src/chain.rs
+# apply BOTH edits
 git diff --stat            # MUST be non-empty
+cargo test --lib chain
+git checkout src/chain.rs
 cargo test --lib chain
 ```
 
-Expected: `rejects_a_genuine_cert_attached_to_an_attacker_signed_describe` FAILS. Restore with `git checkout src/chain.rs` and re-run to confirm PASS.
+Expected: `rejects_a_genuine_cert_attached_to_an_attacker_signed_describe` FAILS under the mutation, and passes again after restore.
 
 - [ ] **Step 7: Verify lint and format**
 
