@@ -11,11 +11,13 @@ repository = "https://github.com/greenticai/greentic-trust"
 default = []
 # Exposes fixture helpers (root keypair generation, cert minting) to downstream crates.
 testing = ["dep:rand"]
+cli = ["dep:clap", "dep:tokio", "dep:rand"]
 
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
+clap = { version = "4", features = ["derive"], optional = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 moka = { version = "0.12", features = ["future"] }
 rand_core = "0.6"
@@ -25,11 +27,19 @@ serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.1"
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
 rand = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+
+[[bin]]
+name = "greentic-trust"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [lints.rust]
 unsafe_code = "forbid"
