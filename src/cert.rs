@@ -17,6 +17,8 @@
 //! only the raw publisher key and leaves both fields unsigned. Nothing has ever
 //! issued a cert, so there is nothing in the wild to keep compatible with.
 
+use std::sync::Arc;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -66,8 +68,9 @@ impl PublisherCert {
             "keyId": key_id,
             "notAfter": not_after,
         });
-        let canonical =
-            serde_jcs::to_vec(&body).map_err(|source| TrustError::Canonicalize { source })?;
+        let canonical = serde_jcs::to_vec(&body).map_err(|source| TrustError::Canonicalize {
+            source: Arc::new(source),
+        })?;
 
         let mut out = Vec::with_capacity(CERT_DOMAIN_V1.len() + canonical.len());
         out.extend_from_slice(CERT_DOMAIN_V1);

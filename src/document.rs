@@ -5,6 +5,8 @@
 //! authoritative only for the DID whose URL served it, so its `id` must equal
 //! the identifier we resolved. Everything else is shape validation.
 
+use std::sync::Arc;
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
@@ -55,7 +57,9 @@ impl TrustDocument {
     /// [`TrustError::DocumentParse`] / [`TrustError::DocumentInvalid`] on shape errors.
     pub fn parse(did: &DidWeb, bytes: &[u8]) -> Result<Self, TrustError> {
         let raw: RawDocument =
-            serde_json::from_slice(bytes).map_err(|source| TrustError::DocumentParse { source })?;
+            serde_json::from_slice(bytes).map_err(|source| TrustError::DocumentParse {
+                source: Arc::new(source),
+            })?;
 
         if raw.id != did.as_str() {
             return Err(TrustError::BindingMismatch {

@@ -5,10 +5,12 @@
 //! wants to tolerate unsigned artifacts expresses that in its own policy, so
 //! that "verified" and "never checked" can never collapse into one value here.
 
+use std::sync::Arc;
+
 use thiserror::Error;
 
 /// Any failure while resolving a trust root or verifying a chain.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum TrustError {
     #[error("not a did:web identifier: {input}")]
     NotWebMethod { input: String },
@@ -22,7 +24,7 @@ pub enum TrustError {
     #[error("fetching the DID document failed: {source}")]
     Fetch {
         #[source]
-        source: reqwest::Error,
+        source: Arc<reqwest::Error>,
     },
 
     #[error("DID document request returned HTTP {code}")]
@@ -31,7 +33,7 @@ pub enum TrustError {
     #[error("DID document is not valid JSON: {source}")]
     DocumentParse {
         #[source]
-        source: serde_json::Error,
+        source: Arc<serde_json::Error>,
     },
 
     #[error("DID document is malformed: {reason}")]
@@ -82,6 +84,6 @@ pub enum TrustError {
     #[error("canonicalizing JSON failed: {source}")]
     Canonicalize {
         #[source]
-        source: serde_json::Error,
+        source: Arc<serde_json::Error>,
     },
 }

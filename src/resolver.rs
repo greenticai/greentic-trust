@@ -75,7 +75,9 @@ impl HttpResolver {
             .get(url)
             .send()
             .await
-            .map_err(|source| TrustError::Fetch { source })?;
+            .map_err(|source| TrustError::Fetch {
+                source: Arc::new(source),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -87,7 +89,9 @@ impl HttpResolver {
             .bytes()
             .await
             .map(|body| body.to_vec())
-            .map_err(|source| TrustError::Fetch { source })
+            .map_err(|source| TrustError::Fetch {
+                source: Arc::new(source),
+            })
     }
 }
 
@@ -112,41 +116,7 @@ impl RootResolver for HttpResolver {
                 TrustDocument::parse(did, &bytes).map(Arc::new)
             })
             .await
-            .map_err(|shared| match Arc::try_unwrap(shared) {
-                Ok(error) => error,
-                Err(shared) => reconstruct_shared_error(&shared),
-            })
-    }
-}
-
-/// Recover a concrete [`TrustError`] from a still-shared `Arc`.
-///
-/// `moka`'s `try_get_with` retains an internal clone of the error `Arc` for
-/// the lifetime of its waiter bookkeeping, so `Arc::try_unwrap` never
-/// succeeds in practice — even for the single-caller case this crate targets.
-/// Every variant this resolver can actually produce carries only `Copy` or
-/// `String` fields except the two that wrap a foreign, non-`Clone` error
-/// (`Fetch`'s `reqwest::Error`, `DocumentParse`'s `serde_json::Error`); those
-/// fall back to a string-carrying `DocumentInvalid` that preserves the
-/// message without needing ownership.
-fn reconstruct_shared_error(error: &TrustError) -> TrustError {
-    match error {
-        TrustError::InsecureScheme { url } => TrustError::InsecureScheme { url: url.clone() },
-        TrustError::HttpStatus { code } => TrustError::HttpStatus { code: *code },
-        TrustError::DocumentInvalid { reason } => TrustError::DocumentInvalid {
-            reason: reason.clone(),
-        },
-        TrustError::BindingMismatch { expected, found } => TrustError::BindingMismatch {
-            expected: expected.clone(),
-            found: found.clone(),
-        },
-        TrustError::NoAssertionKeys { did } => TrustError::NoAssertionKeys { did: did.clone() },
-        TrustError::UnsupportedAlgorithm { alg } => {
-            TrustError::UnsupportedAlgorithm { alg: alg.clone() }
-        }
-        other => TrustError::DocumentInvalid {
-            reason: other.to_string(),
-        },
+            .map_err(|shared| (*shared).clone())
     }
 }
 
@@ -262,6 +232,18 @@ mod tests {
             .expect_err("rejects");
 
         assert!(matches!(error, TrustError::InsecureScheme { .. }));
+    }
+
+    #[tokio::test]
+    async fn surfaces_a_connection_failure_as_fetch() {
+        // Nothing listens on this port, so the request fails at the transport
+        // layer rather than with an HTTP status — this must surface as
+        // `TrustError::Fetch`, not get flattened into `DocumentInvalid`.
+        let did = DidWeb::parse("did:web:127.0.0.1%3A1").expect("parses");
+        let resolver = HttpResolver::new(Duration::from_mins(10), 16).allow_http();
+
+        let error = resolver.resolve(&did).await.expect_err("rejects");
+        assert!(matches!(error, TrustError::Fetch { .. }));
     }
 
     #[tokio::test]
