@@ -35,6 +35,30 @@ production — on an **air-gapped** machine:
 The private key is the raw 32-byte Ed25519 seed, base64. `gen-root` never encrypts it —
 your secret manager or hardware does the sealing.
 
+## 1b. Mint a publisher certificate
+
+A publisher certificate lets the runner verify that a publisher's signing key is
+vouched for by the Greentic root — replacing the flat trusted-signer allowlist.
+Mint one at publisher onboarding (and at key rotation), offline, over the
+publisher's **public** key:
+
+    wrangler secret get GREENTIC_TRUST_ROOT_RESEARCH | greentic-trust mint-cert \
+      --publisher-key <publisher-x-base64url> \
+      --key-id pk_acme_1 \
+      --not-after 2027-01-01T00:00:00Z \
+      > acme.cert.json
+
+The root private seed is read from **stdin**, never a flag, so it stays out of
+`ps` output and shell history. Everything else — the publisher's public key, the
+key id, the expiry — is non-secret. The `PublisherCert` JSON on stdout is what
+store-server stores against the publisher and embeds into `describe.json` at
+publish (S3b).
+
+Certs are minted at onboarding/rotation, not per publish, so the root only comes
+out for this step and step 1 — never for a routine publish. Pick a `--not-after`
+that matches your rotation cadence; an expired cert is refused, so re-mint before
+it lapses.
+
 ## 2. Build the document
 
     greentic-trust build-doc \
