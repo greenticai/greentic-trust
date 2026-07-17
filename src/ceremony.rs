@@ -6,18 +6,17 @@
 //! test pins that — co-locating build and parse in one crate is what keeps them
 //! from drifting.
 //!
-//! Note for S3: cert *minting* (`mint_cert`) has NOT graduated here yet — it
-//! still lives in `cert::fixtures` behind `#[cfg(any(test, feature = "testing"))]`.
-//! S2 did not need it, and graduating it means changing its signature to return
-//! `Result` (no `expect` in a production path), which would churn S1's merged
-//! tests. When store-server needs to issue certs in production, move it here and
-//! make that change then.
+//! `mint_cert` (the cert *mint*), `generate_root`, and `build_document` all
+//! live here as the always-compiled mint side of the wire format the rest of
+//! the crate verifies.
 
+use base64::engine::general_purpose::STANDARD as B64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use serde_json::json;
 
+use crate::cert::PublisherCert;
 use crate::did::DidWeb;
 use crate::error::TrustError;
 
@@ -84,6 +83,33 @@ pub fn build_document(
         "verificationMethod": methods,
         "assertionMethod": assertions,
     }))
+}
+
+/// Mint a `PublisherCert`: the root signs its attestation over the publisher's
+/// key, bound to a key id and an expiry.
+///
+/// This is the *mint* side of the format [`PublisherCert::verify`] checks — it
+/// signs exactly [`PublisherCert::signed_bytes`], which prepends the
+/// domain-separation prefix and JCS-canonicalizes the body. Co-locating mint and
+/// verify in one crate is what keeps them from drifting.
+///
+/// # Errors
+/// [`TrustError`] if the cert body cannot be canonicalized (`signed_bytes`).
+pub fn mint_cert(
+    root: &SigningKey,
+    publisher: &VerifyingKey,
+    key_id: &str,
+    not_after: &str,
+) -> Result<PublisherCert, TrustError> {
+    let mut cert = PublisherCert {
+        publisher_public_key: B64.encode(publisher.as_bytes()),
+        root_signature: String::new(),
+        key_id: Some(key_id.to_owned()),
+        not_after: Some(not_after.to_owned()),
+    };
+    let signed = cert.signed_bytes()?;
+    cert.root_signature = B64.encode(root.sign(&signed).to_bytes());
+    Ok(cert)
 }
 
 #[cfg(test)]
@@ -186,5 +212,50 @@ mod tests {
         // exact hardcoded x would be fragile against StdRng algorithm changes.
         assert_eq!(seeded_root(9).to_bytes(), seeded_root(9).to_bytes());
         assert_ne!(seeded_root(9).to_bytes(), seeded_root(10).to_bytes());
+    }
+
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .expect("valid timestamp")
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn minted_cert_verifies_against_the_root() {
+        // The anti-drift guarantee for the cert path: mint_cert signs the exact
+        // bytes PublisherCert::verify reconstructs. If they diverge, this is red.
+        let root = seeded_root(5);
+        let publisher = seeded_root(6);
+        let cert = mint_cert(
+            &root,
+            &publisher.verifying_key(),
+            "pk_test_1",
+            "2030-01-01T00:00:00Z",
+        )
+        .expect("mints");
+
+        let recovered = cert
+            .verify(&[root.verifying_key()], at("2026-07-17T00:00:00Z"))
+            .expect("verifies against the root");
+        assert_eq!(recovered.as_bytes(), publisher.verifying_key().as_bytes());
+    }
+
+    #[test]
+    fn minted_cert_rejected_by_a_different_root() {
+        let root = seeded_root(7);
+        let other = seeded_root(8);
+        let publisher = seeded_root(9);
+        let cert = mint_cert(
+            &root,
+            &publisher.verifying_key(),
+            "pk_test_1",
+            "2030-01-01T00:00:00Z",
+        )
+        .expect("mints");
+
+        let error = cert
+            .verify(&[other.verifying_key()], at("2026-07-17T00:00:00Z"))
+            .expect_err("a cert signed by root must not verify against a different root");
+        assert!(matches!(error, TrustError::CertSignatureInvalid));
     }
 }

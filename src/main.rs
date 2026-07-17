@@ -47,6 +47,19 @@ enum Command {
         #[arg(long)]
         file: Option<std::path::PathBuf>,
     },
+    /// Mint a publisher certificate. The root private seed is read from stdin
+    /// (base64, the raw 32-byte Ed25519 seed — exactly `gen-root`'s output).
+    MintCert {
+        /// The publisher public key to certify (JWK x, base64url).
+        #[arg(long)]
+        publisher_key: String,
+        /// A stable identifier for the publisher key this cert vouches for.
+        #[arg(long)]
+        key_id: String,
+        /// RFC3339 expiry, e.g. 2027-01-01T00:00:00Z.
+        #[arg(long)]
+        not_after: String,
+    },
 }
 
 /// A ceremony error, rendered to stderr with a non-zero exit.
@@ -71,6 +84,11 @@ fn run() -> Result<(), CliError> {
             expected_root,
             file,
         } => run_verify_doc(&did, &expected_root, file.as_deref()),
+        Command::MintCert {
+            publisher_key,
+            key_id,
+            not_after,
+        } => run_mint_cert(&publisher_key, &key_id, &not_after),
     }
 }
 
@@ -93,26 +111,25 @@ fn run_gen_root() -> Result<(), CliError> {
     Ok(())
 }
 
-/// Decode a JWK `x` (base64url, 32 bytes) into a verifying key.
-fn decode_public(x: &str) -> Result<ed25519_dalek::VerifyingKey, CliError> {
+/// Decode a JWK `x` (base64url, 32 bytes) into a verifying key. `label` names
+/// the key in error messages ("root public key", "publisher key", ...).
+fn decode_public(x: &str, label: &str) -> Result<ed25519_dalek::VerifyingKey, CliError> {
     let raw = URL_SAFE_NO_PAD
         .decode(x.trim())
-        .map_err(|e| CliError::Decode(format!("root public key is not base64url: {e}")))?;
-    let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
-        CliError::Decode(format!(
-            "root public key is {} bytes, expected 32",
-            raw.len()
-        ))
-    })?;
+        .map_err(|e| CliError::Decode(format!("{label} is not base64url: {e}")))?;
+    let bytes: [u8; 32] = raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::Decode(format!("{label} is {} bytes, expected 32", raw.len())))?;
     ed25519_dalek::VerifyingKey::from_bytes(&bytes)
-        .map_err(|e| CliError::Decode(format!("root public key is not a valid Ed25519 key: {e}")))
+        .map_err(|e| CliError::Decode(format!("{label} is not a valid Ed25519 key: {e}")))
 }
 
 fn run_build_doc(did: &str, root_public: &[String]) -> Result<(), CliError> {
     let did = DidWeb::parse(did)?;
     let roots = root_public
         .iter()
-        .map(|x| decode_public(x))
+        .map(|x| decode_public(x, "root public key"))
         .collect::<Result<Vec<_>, _>>()?;
     let doc = build_document(&did, &roots)?;
     println!(
@@ -128,7 +145,7 @@ fn run_verify_doc(
     file: Option<&std::path::Path>,
 ) -> Result<(), CliError> {
     let did = DidWeb::parse(did)?;
-    let expected = decode_public(expected_root)?;
+    let expected = decode_public(expected_root, "expected root key")?;
 
     let matched = if let Some(path) = file {
         let bytes = std::fs::read(path)?;
@@ -150,6 +167,34 @@ fn run_verify_doc(
     } else {
         Err(CliError::Mismatch)
     }
+}
+
+/// Read the root private seed from stdin and reconstruct the signing key. The
+/// seed is the raw 32-byte Ed25519 seed, base64 STANDARD — `gen-root`'s output.
+/// Reading from stdin (not a flag) keeps the secret out of `ps`/shell history.
+fn read_root_seed() -> Result<ed25519_dalek::SigningKey, CliError> {
+    use std::io::Read as _;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    let raw = STANDARD
+        .decode(buf.trim())
+        .map_err(|e| CliError::Decode(format!("root seed on stdin is not base64: {e}")))?;
+    let bytes: [u8; 32] = raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::Decode(format!("root seed is {} bytes, expected 32", raw.len())))?;
+    Ok(ed25519_dalek::SigningKey::from_bytes(&bytes))
+}
+
+fn run_mint_cert(publisher_key: &str, key_id: &str, not_after: &str) -> Result<(), CliError> {
+    let root = read_root_seed()?;
+    let publisher = decode_public(publisher_key, "publisher key")?;
+    let cert = greentic_trust::ceremony::mint_cert(&root, &publisher, key_id, not_after)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&cert).map_err(|e| CliError::Decode(e.to_string()))?
+    );
+    Ok(())
 }
 
 fn main() -> ExitCode {

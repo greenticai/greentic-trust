@@ -167,9 +167,8 @@ fn decode_signature(encoded: &str) -> Result<Signature, TrustError> {
 /// production build unless the `testing` feature is explicitly enabled.
 #[cfg(any(test, feature = "testing"))]
 pub mod fixtures {
-    use super::{PublisherCert, B64};
-    use base64::Engine as _;
-    use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+    use super::PublisherCert;
+    use ed25519_dalek::{SigningKey, VerifyingKey};
 
     /// Generate a root keypair for tests.
     #[must_use]
@@ -177,7 +176,8 @@ pub mod fixtures {
         crate::ceremony::generate_root(&mut rand::rngs::OsRng)
     }
 
-    /// Mint a cert the way S2's ceremony and S3's issuer will.
+    /// Mint a cert the way the ceremony and S3's issuer do. Test-only wrapper —
+    /// the real, fallible implementation is `crate::ceremony::mint_cert`.
     ///
     /// # Panics
     /// Panics if the cert body cannot be canonicalized. Test-only.
@@ -188,17 +188,8 @@ pub mod fixtures {
         key_id: &str,
         not_after: &str,
     ) -> PublisherCert {
-        let mut cert = PublisherCert {
-            publisher_public_key: B64.encode(publisher.as_bytes()),
-            root_signature: String::new(),
-            key_id: Some(key_id.to_owned()),
-            not_after: Some(not_after.to_owned()),
-        };
-        let signed = cert
-            .signed_bytes()
-            .expect("fixture cert body canonicalizes");
-        cert.root_signature = B64.encode(root.sign(&signed).to_bytes());
-        cert
+        crate::ceremony::mint_cert(root, publisher, key_id, not_after)
+            .expect("fixture cert body canonicalizes")
     }
 }
 

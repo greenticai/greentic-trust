@@ -151,3 +151,63 @@ fn build_doc_rejects_a_malformed_did() {
         .assert()
         .failure();
 }
+
+#[test]
+fn mint_cert_reads_seed_from_stdin_and_emits_a_cert_that_verifies() {
+    use chrono::Utc;
+    use greentic_trust::PublisherCert;
+
+    let (root_seed, root_x) = fresh_root();
+    let (_pub_seed, pub_x) = fresh_root();
+
+    let output = bin()
+        .args([
+            "mint-cert",
+            "--publisher-key",
+            &pub_x,
+            "--key-id",
+            "pk_test_1",
+            "--not-after",
+            "2030-01-01T00:00:00Z",
+        ])
+        .write_stdin(root_seed)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let cert: PublisherCert =
+        serde_json::from_slice(&output.stdout).expect("stdout is a PublisherCert");
+
+    // Reconstruct the root verifying key from gen-root's public x (base64url).
+    let root_bytes: [u8; 32] = URL_SAFE_NO_PAD.decode(&root_x).unwrap().try_into().unwrap();
+    let root_pub = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes).unwrap();
+
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let certified = cert
+        .verify(&[root_pub], now)
+        .expect("cert verifies against the root");
+
+    let pub_bytes: [u8; 32] = URL_SAFE_NO_PAD.decode(&pub_x).unwrap().try_into().unwrap();
+    assert_eq!(certified.as_bytes(), &pub_bytes);
+}
+
+#[test]
+fn mint_cert_rejects_a_non_base64_seed_on_stdin() {
+    let (_seed, pub_x) = fresh_root();
+    bin()
+        .args([
+            "mint-cert",
+            "--publisher-key",
+            &pub_x,
+            "--key-id",
+            "pk_test_1",
+            "--not-after",
+            "2030-01-01T00:00:00Z",
+        ])
+        .write_stdin("not base64 !!!")
+        .assert()
+        .failure();
+}
