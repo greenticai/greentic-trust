@@ -94,7 +94,7 @@ pub fn build_document(
     // Emit `service` only when non-empty so existing zero-service documents
     // remain byte-identical.
     if !services.is_empty() {
-        let service_array: Vec<serde_json::Value> = services
+        let entries: Vec<serde_json::Value> = services
             .iter()
             .map(|s| {
                 json!({
@@ -104,7 +104,7 @@ pub fn build_document(
                 })
             })
             .collect();
-        doc["service"] = json!(service_array);
+        doc["service"] = serde_json::Value::Array(entries);
     }
 
     Ok(doc)

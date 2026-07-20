@@ -10,7 +10,7 @@ use std::sync::Arc;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::did::DidWeb;
 use crate::error::TrustError;
@@ -20,14 +20,16 @@ use crate::error::TrustError;
 /// A data-only representation: unknown `type` values are retained, not rejected,
 /// because service type is not a trust decision — it merely describes how a
 /// downstream consumer should reach the endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceEntry {
     /// The service id (e.g. `"did:web:trust.greentic.cloud#updates"`).
     pub id: String,
     /// The service type (e.g. `"GreenticUpdateEndpoint"`).
+    #[serde(rename = "type")]
     #[allow(clippy::struct_field_names)]
     pub service_type: String,
     /// The service endpoint URL.
+    #[serde(rename = "serviceEndpoint")]
     pub service_endpoint: String,
 }
 
@@ -48,16 +50,7 @@ struct RawDocument {
     #[serde(default, rename = "assertionMethod")]
     assertion_method: Vec<String>,
     #[serde(default)]
-    service: Vec<RawServiceEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawServiceEntry {
-    id: String,
-    #[serde(rename = "type")]
-    service_type: String,
-    #[serde(rename = "serviceEndpoint")]
-    service_endpoint: String,
+    service: Vec<ServiceEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,20 +108,10 @@ impl TrustDocument {
             });
         }
 
-        let services = raw
-            .service
-            .into_iter()
-            .map(|s| ServiceEntry {
-                id: s.id,
-                service_type: s.service_type,
-                service_endpoint: s.service_endpoint,
-            })
-            .collect();
-
         Ok(Self {
             did: raw.id,
             assertion_keys,
-            services,
+            services: raw.service,
         })
     }
 
