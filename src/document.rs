@@ -15,11 +15,29 @@ use serde::Deserialize;
 use crate::did::DidWeb;
 use crate::error::TrustError;
 
-/// A DID document reduced to the keys it authorizes for assertions.
+/// A service entry from a DID document's `service` array.
+///
+/// A data-only representation: unknown `type` values are retained, not rejected,
+/// because service type is not a trust decision — it merely describes how a
+/// downstream consumer should reach the endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceEntry {
+    /// The service id (e.g. `"did:web:trust.greentic.cloud#updates"`).
+    pub id: String,
+    /// The service type (e.g. `"GreenticUpdateEndpoint"`).
+    #[allow(clippy::struct_field_names)]
+    pub service_type: String,
+    /// The service endpoint URL.
+    pub service_endpoint: String,
+}
+
+/// A DID document reduced to the keys it authorizes for assertions, plus any
+/// service entries it advertises.
 #[derive(Debug, Clone)]
 pub struct TrustDocument {
     did: String,
     assertion_keys: Vec<VerifyingKey>,
+    services: Vec<ServiceEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +47,17 @@ struct RawDocument {
     verification_method: Vec<RawVerificationMethod>,
     #[serde(default, rename = "assertionMethod")]
     assertion_method: Vec<String>,
+    #[serde(default)]
+    service: Vec<RawServiceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawServiceEntry {
+    id: String,
+    #[serde(rename = "type")]
+    service_type: String,
+    #[serde(rename = "serviceEndpoint")]
+    service_endpoint: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,9 +115,20 @@ impl TrustDocument {
             });
         }
 
+        let services = raw
+            .service
+            .into_iter()
+            .map(|s| ServiceEntry {
+                id: s.id,
+                service_type: s.service_type,
+                service_endpoint: s.service_endpoint,
+            })
+            .collect();
+
         Ok(Self {
             did: raw.id,
             assertion_keys,
+            services,
         })
     }
 
@@ -102,6 +142,15 @@ impl TrustDocument {
     #[must_use]
     pub fn assertion_keys(&self) -> &[VerifyingKey] {
         &self.assertion_keys
+    }
+
+    /// Service entries advertised by this document, if any.
+    ///
+    /// An absent or empty `service` array in the source document yields an empty
+    /// slice — never an error. Unknown service types are retained as-is.
+    #[must_use]
+    pub fn services(&self) -> &[ServiceEntry] {
+        &self.services
     }
 }
 
@@ -262,5 +311,85 @@ mod tests {
         let error = TrustDocument::parse(&did, &bytes).expect_err("rejects");
 
         assert!(matches!(error, TrustError::DocumentInvalid { .. }));
+    }
+
+    #[test]
+    fn parses_a_service_array() {
+        let (_signing, x) = a_key();
+        let did = DidWeb::parse("did:web:trust.greentic.cloud").expect("parses");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": "did:web:trust.greentic.cloud",
+            "verificationMethod": [{
+                "id": "did:web:trust.greentic.cloud#root-1",
+                "type": "JsonWebKey2020",
+                "controller": "did:web:trust.greentic.cloud",
+                "publicKeyJwk": { "kty": "OKP", "crv": "Ed25519", "x": x, "use": "sig" },
+            }],
+            "assertionMethod": ["did:web:trust.greentic.cloud#root-1"],
+            "service": [{
+                "id": "did:web:trust.greentic.cloud#updates",
+                "type": "GreenticUpdateEndpoint",
+                "serviceEndpoint": "https://updates.greentic.cloud",
+            }],
+        }))
+        .expect("serializes");
+
+        let document = TrustDocument::parse(&did, &bytes).expect("parses");
+
+        assert_eq!(document.services().len(), 1);
+        assert_eq!(
+            document.services()[0].id,
+            "did:web:trust.greentic.cloud#updates"
+        );
+        assert_eq!(
+            document.services()[0].service_type,
+            "GreenticUpdateEndpoint"
+        );
+        assert_eq!(
+            document.services()[0].service_endpoint,
+            "https://updates.greentic.cloud"
+        );
+    }
+
+    #[test]
+    fn absent_service_yields_empty_and_no_error() {
+        // A document with no `service` key at all must parse successfully with
+        // an empty services slice — not an error.
+        let (_signing, x) = a_key();
+        let did = DidWeb::parse("did:web:trust.greentic.cloud").expect("parses");
+        let bytes = document_json("did:web:trust.greentic.cloud", &x, "Ed25519");
+
+        let document = TrustDocument::parse(&did, &bytes).expect("parses");
+
+        assert!(document.services().is_empty());
+    }
+
+    #[test]
+    fn unknown_service_type_is_retained() {
+        // Unknown service types are data, not a trust decision — they must be
+        // kept, not rejected or silently dropped.
+        let (_signing, x) = a_key();
+        let did = DidWeb::parse("did:web:trust.greentic.cloud").expect("parses");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": "did:web:trust.greentic.cloud",
+            "verificationMethod": [{
+                "id": "did:web:trust.greentic.cloud#root-1",
+                "type": "JsonWebKey2020",
+                "controller": "did:web:trust.greentic.cloud",
+                "publicKeyJwk": { "kty": "OKP", "crv": "Ed25519", "x": x, "use": "sig" },
+            }],
+            "assertionMethod": ["did:web:trust.greentic.cloud#root-1"],
+            "service": [{
+                "id": "did:web:trust.greentic.cloud#exotic",
+                "type": "SomeFutureServiceType",
+                "serviceEndpoint": "https://future.example.com",
+            }],
+        }))
+        .expect("serializes");
+
+        let document = TrustDocument::parse(&did, &bytes).expect("parses");
+
+        assert_eq!(document.services().len(), 1);
+        assert_eq!(document.services()[0].service_type, "SomeFutureServiceType");
     }
 }
