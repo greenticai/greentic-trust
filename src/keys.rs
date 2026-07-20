@@ -68,13 +68,26 @@ mod tests {
 
     #[test]
     fn key_id_matches_known_derivation_vector() {
-        // Cross-check against the fleet's canonical derivation: for a key built
-        // from seed [1; 32], compute the expected key id by hand (SHA-256 of the
-        // raw 32-byte public key, first 16 bytes, hex-encoded).
+        // A FROZEN vector, deliberately not re-derived here.
+        //
+        // Re-computing the expectation with the same algorithm the function uses
+        // only proves the code agrees with itself: change the implementation and
+        // the expectation changes with it, silently. This key id must agree with
+        // `greentic-distributor-client`'s canonical derivation
+        // (`hex::encode(&digest[..16])` in its `signing` module), because the
+        // verifier matches a DSSE signature's `keyid` against the trust root by
+        // exact string equality — a divergence here does not fail loudly, it
+        // just stops every signature from ever matching.
+        //
+        // Vector: Ed25519 key from seed [1; 32]. Cross-checked against an
+        // independent SHA-256 implementation outside this crate.
         let vk = key_from_seed(1);
-        let digest = Sha256::digest(vk.to_bytes());
-        let expected = hex::encode(&digest[..16]);
-        assert_eq!(greentic_key_id(&vk), expected);
+        assert_eq!(
+            hex::encode(vk.to_bytes()),
+            "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+            "seed [1; 32] no longer produces the public key this vector was cut from"
+        );
+        assert_eq!(greentic_key_id(&vk), "34750f98bd59fcfc946da45aaabe933b");
     }
 
     #[test]
