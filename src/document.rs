@@ -10,16 +10,36 @@ use std::sync::Arc;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::did::DidWeb;
 use crate::error::TrustError;
 
-/// A DID document reduced to the keys it authorizes for assertions.
+/// A service entry from a DID document's `service` array.
+///
+/// A data-only representation: unknown `type` values are retained, not rejected,
+/// because service type is not a trust decision — it merely describes how a
+/// downstream consumer should reach the endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceEntry {
+    /// The service id (e.g. `"did:web:trust.greentic.cloud#updates"`).
+    pub id: String,
+    /// The service type (e.g. `"GreenticUpdateEndpoint"`).
+    #[serde(rename = "type")]
+    #[allow(clippy::struct_field_names)]
+    pub service_type: String,
+    /// The service endpoint URL.
+    #[serde(rename = "serviceEndpoint")]
+    pub service_endpoint: String,
+}
+
+/// A DID document reduced to the keys it authorizes for assertions, plus any
+/// service entries it advertises.
 #[derive(Debug, Clone)]
 pub struct TrustDocument {
     did: String,
     assertion_keys: Vec<VerifyingKey>,
+    services: Vec<ServiceEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +49,15 @@ struct RawDocument {
     verification_method: Vec<RawVerificationMethod>,
     #[serde(default, rename = "assertionMethod")]
     assertion_method: Vec<String>,
+    /// Held untyped on purpose. DID Core lets `type` be a string OR an array and
+    /// `serviceEndpoint` be a string, a map, or an array; this crate models only
+    /// the simple string form. Deserializing straight into `Vec<ServiceEntry>`
+    /// would make one spec-legal entry abort the whole document — and since
+    /// `service` carries no trust, that would turn a cosmetic edit to the
+    /// published trust root into a fleet-wide outage. Entries are converted
+    /// individually in `parse`, skipping any this crate cannot model.
+    #[serde(default)]
+    service: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,9 +115,18 @@ impl TrustDocument {
             });
         }
 
+        // Lenient by design: an entry shaped in a way this crate does not model
+        // is skipped, never fatal. See the `service` field on `RawDocument`.
+        let services = raw
+            .service
+            .into_iter()
+            .filter_map(|entry| serde_json::from_value::<ServiceEntry>(entry).ok())
+            .collect();
+
         Ok(Self {
             did: raw.id,
             assertion_keys,
+            services,
         })
     }
 
@@ -102,6 +140,15 @@ impl TrustDocument {
     #[must_use]
     pub fn assertion_keys(&self) -> &[VerifyingKey] {
         &self.assertion_keys
+    }
+
+    /// Service entries advertised by this document, if any.
+    ///
+    /// An absent or empty `service` array in the source document yields an empty
+    /// slice — never an error. Unknown service types are retained as-is.
+    #[must_use]
+    pub fn services(&self) -> &[ServiceEntry] {
+        &self.services
     }
 }
 
@@ -262,5 +309,144 @@ mod tests {
         let error = TrustDocument::parse(&did, &bytes).expect_err("rejects");
 
         assert!(matches!(error, TrustError::DocumentInvalid { .. }));
+    }
+
+    #[test]
+    fn parses_a_service_array() {
+        let (_signing, x) = a_key();
+        let did = DidWeb::parse("did:web:trust.greentic.cloud").expect("parses");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": "did:web:trust.greentic.cloud",
+            "verificationMethod": [{
+                "id": "did:web:trust.greentic.cloud#root-1",
+                "type": "JsonWebKey2020",
+                "controller": "did:web:trust.greentic.cloud",
+                "publicKeyJwk": { "kty": "OKP", "crv": "Ed25519", "x": x, "use": "sig" },
+            }],
+            "assertionMethod": ["did:web:trust.greentic.cloud#root-1"],
+            "service": [{
+                "id": "did:web:trust.greentic.cloud#updates",
+                "type": "GreenticUpdateEndpoint",
+                "serviceEndpoint": "https://updates.greentic.cloud",
+            }],
+        }))
+        .expect("serializes");
+
+        let document = TrustDocument::parse(&did, &bytes).expect("parses");
+
+        assert_eq!(document.services().len(), 1);
+        assert_eq!(
+            document.services()[0].id,
+            "did:web:trust.greentic.cloud#updates"
+        );
+        assert_eq!(
+            document.services()[0].service_type,
+            "GreenticUpdateEndpoint"
+        );
+        assert_eq!(
+            document.services()[0].service_endpoint,
+            "https://updates.greentic.cloud"
+        );
+    }
+
+    #[test]
+    fn absent_service_yields_empty_and_no_error() {
+        // A document with no `service` key at all must parse successfully with
+        // an empty services slice — not an error.
+        let (_signing, x) = a_key();
+        let did = DidWeb::parse("did:web:trust.greentic.cloud").expect("parses");
+        let bytes = document_json("did:web:trust.greentic.cloud", &x, "Ed25519");
+
+        let document = TrustDocument::parse(&did, &bytes).expect("parses");
+
+        assert!(document.services().is_empty());
+    }
+
+    #[test]
+    fn unknown_service_type_is_retained() {
+        // Unknown service types are data, not a trust decision — they must be
+        // kept, not rejected or silently dropped.
+        let (_signing, x) = a_key();
+        let did = DidWeb::parse("did:web:trust.greentic.cloud").expect("parses");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": "did:web:trust.greentic.cloud",
+            "verificationMethod": [{
+                "id": "did:web:trust.greentic.cloud#root-1",
+                "type": "JsonWebKey2020",
+                "controller": "did:web:trust.greentic.cloud",
+                "publicKeyJwk": { "kty": "OKP", "crv": "Ed25519", "x": x, "use": "sig" },
+            }],
+            "assertionMethod": ["did:web:trust.greentic.cloud#root-1"],
+            "service": [{
+                "id": "did:web:trust.greentic.cloud#exotic",
+                "type": "SomeFutureServiceType",
+                "serviceEndpoint": "https://future.example.com",
+            }],
+        }))
+        .expect("serializes");
+
+        let document = TrustDocument::parse(&did, &bytes).expect("parses");
+
+        assert_eq!(document.services().len(), 1);
+        assert_eq!(document.services()[0].service_type, "SomeFutureServiceType");
+    }
+
+    #[test]
+    fn did_core_shaped_service_entries_do_not_break_root_verification() {
+        // DID Core permits `type` to be a string OR an array, and
+        // `serviceEndpoint` to be a string, a map, or an array. This crate only
+        // needs the simple string form, but a document is free to carry the
+        // others — and `service` is DATA, never a trust decision.
+        //
+        // The failure this pins is availability, not authenticity: if an entry
+        // this crate cannot model aborts the whole parse, then publishing a
+        // perfectly spec-legal `service` entry to the trust root silently stops
+        // every client in the fleet from resolving its root keys. Unmodellable
+        // entries must be skipped; the assertion keys must still come back.
+        let (_signing, x) = a_key();
+        let did = DidWeb::parse("did:web:trust.greentic.cloud").expect("parses");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": "did:web:trust.greentic.cloud",
+            "verificationMethod": [{
+                "id": "did:web:trust.greentic.cloud#root-1",
+                "type": "JsonWebKey2020",
+                "controller": "did:web:trust.greentic.cloud",
+                "publicKeyJwk": { "kty": "OKP", "crv": "Ed25519", "x": x, "use": "sig" },
+            }],
+            "assertionMethod": ["did:web:trust.greentic.cloud#root-1"],
+            "service": [
+                {
+                    // type as an array — legal DID Core, not modellable here
+                    "id": "did:web:trust.greentic.cloud#domains",
+                    "type": ["LinkedDomains"],
+                    "serviceEndpoint": "https://greentic.cloud",
+                },
+                {
+                    // serviceEndpoint as a map — also legal, also not modellable
+                    "id": "did:web:trust.greentic.cloud#hub",
+                    "type": "IdentityHub",
+                    "serviceEndpoint": { "origins": ["https://hub.example.com"] },
+                },
+                {
+                    // the simple form this crate does model
+                    "id": "did:web:trust.greentic.cloud#updates",
+                    "type": "GreenticUpdateEndpoint",
+                    "serviceEndpoint": "https://updates.greentic.cloud",
+                },
+            ],
+        }))
+        .expect("serializes");
+
+        let document = TrustDocument::parse(&did, &bytes)
+            .expect("a spec-legal service entry must never break root resolution");
+
+        // The root key is still available — that is the security-relevant part.
+        assert_eq!(document.assertion_keys().len(), 1);
+        // Only the modellable entry is surfaced; the other two are skipped, not fatal.
+        assert_eq!(document.services().len(), 1);
+        assert_eq!(
+            document.services()[0].id,
+            "did:web:trust.greentic.cloud#updates"
+        );
     }
 }

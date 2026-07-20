@@ -10,6 +10,7 @@ use base64::Engine as _;
 use clap::{Parser, Subcommand};
 
 use greentic_trust::ceremony::{build_document, generate_root};
+use greentic_trust::document::ServiceEntry;
 use greentic_trust::{DidWeb, HttpResolver, RootResolver, TrustDocument};
 
 #[derive(Parser)]
@@ -34,6 +35,10 @@ enum Command {
         /// A root public key (JWK x, base64url). Repeat for a rotation-overlap doc.
         #[arg(long = "root-public", required = true)]
         root_public: Vec<String>,
+        /// A service entry as TYPE=ENDPOINT. Repeatable.
+        /// The service id is derived as `{did}#svc-{n}` (n from 1).
+        #[arg(long = "service")]
+        service: Vec<String>,
     },
     /// Verify a published or local did.json serves the expected root.
     VerifyDoc {
@@ -78,7 +83,11 @@ enum CliError {
 fn run() -> Result<(), CliError> {
     match Cli::parse().command {
         Command::GenRoot => run_gen_root(),
-        Command::BuildDoc { did, root_public } => run_build_doc(&did, &root_public),
+        Command::BuildDoc {
+            did,
+            root_public,
+            service,
+        } => run_build_doc(&did, &root_public, &service),
         Command::VerifyDoc {
             did,
             expected_root,
@@ -125,13 +134,30 @@ fn decode_public(x: &str, label: &str) -> Result<ed25519_dalek::VerifyingKey, Cl
         .map_err(|e| CliError::Decode(format!("{label} is not a valid Ed25519 key: {e}")))
 }
 
-fn run_build_doc(did: &str, root_public: &[String]) -> Result<(), CliError> {
+fn run_build_doc(
+    did: &str,
+    root_public: &[String],
+    service_args: &[String],
+) -> Result<(), CliError> {
     let did = DidWeb::parse(did)?;
     let roots = root_public
         .iter()
         .map(|x| decode_public(x, "root public key"))
         .collect::<Result<Vec<_>, _>>()?;
-    let doc = build_document(&did, &roots)?;
+
+    let mut services = Vec::with_capacity(service_args.len());
+    for (index, arg) in service_args.iter().enumerate() {
+        let (svc_type, endpoint) = arg.split_once('=').ok_or_else(|| {
+            CliError::Decode(format!("--service must be TYPE=ENDPOINT, got: {arg}"))
+        })?;
+        services.push(ServiceEntry {
+            id: format!("{}#svc-{}", did.as_str(), index + 1),
+            service_type: svc_type.to_owned(),
+            service_endpoint: endpoint.to_owned(),
+        });
+    }
+
+    let doc = build_document(&did, &roots, &services)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&doc).map_err(|e| CliError::Decode(e.to_string()))?

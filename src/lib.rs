@@ -12,11 +12,13 @@ pub mod chain;
 pub mod did;
 pub mod document;
 pub mod error;
+pub mod keys;
 pub mod resolver;
 
 pub use cert::PublisherCert;
 pub use chain::verify_describe;
 pub use did::DidWeb;
-pub use document::TrustDocument;
+pub use document::{ServiceEntry, TrustDocument};
 pub use error::TrustError;
+pub use keys::{greentic_key_id, spki_pem};
 pub use resolver::{HttpResolver, RootResolver};

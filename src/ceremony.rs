@@ -18,6 +18,7 @@ use serde_json::json;
 
 use crate::cert::PublisherCert;
 use crate::did::DidWeb;
+use crate::document::ServiceEntry;
 use crate::error::TrustError;
 
 /// Generate a root signing key from a caller-supplied RNG.
@@ -30,7 +31,8 @@ pub fn generate_root<R: rand_core::CryptoRngCore + ?Sized>(rng: &mut R) -> Signi
     SigningKey::generate(rng)
 }
 
-/// Build the `did.json` document for `did`, carrying one or more root keys.
+/// Build the `did.json` document for `did`, carrying one or more root keys and
+/// an optional set of service entries.
 ///
 /// More than one key appears only during a root-rotation overlap, so an old and
 /// a new root are both valid while the TTL drains. Each key becomes one
@@ -38,11 +40,16 @@ pub fn generate_root<R: rand_core::CryptoRngCore + ?Sized>(rng: &mut R) -> Signi
 /// `assertionMethod` reference — the two members the verifier reads — with a JWK
 /// of `kty=OKP, crv=Ed25519, x=URL_SAFE_NO_PAD(pubkey)`.
 ///
+/// `services` is emitted as a `service` key only when non-empty, so existing
+/// documents that carry no services are byte-identical to what the old
+/// zero-service signature produced.
+///
 /// # Errors
 /// [`TrustError::DocumentInvalid`] if `roots` is empty.
 pub fn build_document(
     did: &DidWeb,
     roots: &[VerifyingKey],
+    services: &[ServiceEntry],
 ) -> Result<serde_json::Value, TrustError> {
     if roots.is_empty() {
         return Err(TrustError::DocumentInvalid {
@@ -74,7 +81,7 @@ pub fn build_document(
     // is an assertion. It is deliberately NOT in `authentication` — that
     // relationship proves control *as the DID subject*, a capability a signing
     // root has no business advertising to a third-party did:web resolver.
-    Ok(json!({
+    let mut doc = json!({
         "@context": [
             "https://www.w3.org/ns/did/v1",
             "https://w3id.org/security/suites/jws-2020/v1",
@@ -82,7 +89,25 @@ pub fn build_document(
         "id": id,
         "verificationMethod": methods,
         "assertionMethod": assertions,
-    }))
+    });
+
+    // Emit `service` only when non-empty so existing zero-service documents
+    // remain byte-identical.
+    if !services.is_empty() {
+        let entries: Vec<serde_json::Value> = services
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "type": s.service_type,
+                    "serviceEndpoint": s.service_endpoint,
+                })
+            })
+            .collect();
+        doc["service"] = serde_json::Value::Array(entries);
+    }
+
+    Ok(doc)
 }
 
 /// Mint a `PublisherCert`: the root signs its attestation over the publisher's
@@ -136,7 +161,7 @@ mod tests {
         let root = seeded_root(1);
         let did = DidWeb::parse(DID).expect("parses");
 
-        let doc = build_document(&did, &[root.verifying_key()]).expect("builds");
+        let doc = build_document(&did, &[root.verifying_key()], &[]).expect("builds");
         let bytes = serde_json::to_vec(&doc).expect("serializes");
         let parsed = TrustDocument::parse(&did, &bytes).expect("verifier accepts it");
 
@@ -151,7 +176,7 @@ mod tests {
     fn built_document_id_equals_the_did() {
         let root = seeded_root(2);
         let did = DidWeb::parse(DID).expect("parses");
-        let doc = build_document(&did, &[root.verifying_key()]).expect("builds");
+        let doc = build_document(&did, &[root.verifying_key()], &[]).expect("builds");
         assert_eq!(doc["id"], serde_json::json!(DID));
     }
 
@@ -162,7 +187,8 @@ mod tests {
         let b = seeded_root(4);
         let did = DidWeb::parse(DID).expect("parses");
 
-        let doc = build_document(&did, &[a.verifying_key(), b.verifying_key()]).expect("builds");
+        let doc =
+            build_document(&did, &[a.verifying_key(), b.verifying_key()], &[]).expect("builds");
         let bytes = serde_json::to_vec(&doc).expect("serializes");
         let parsed = TrustDocument::parse(&did, &bytes).expect("verifier accepts it");
 
@@ -192,7 +218,7 @@ mod tests {
             .expect("some key encodes differently under the two alphabets");
         let did = DidWeb::parse(DID).expect("parses");
 
-        let doc = build_document(&did, &[root.verifying_key()]).expect("builds");
+        let doc = build_document(&did, &[root.verifying_key()], &[]).expect("builds");
         assert_eq!(
             doc["verificationMethod"][0]["publicKeyJwk"]["x"],
             serde_json::json!(x_url)
@@ -202,7 +228,7 @@ mod tests {
     #[test]
     fn empty_roots_is_rejected() {
         let did = DidWeb::parse(DID).expect("parses");
-        let error = build_document(&did, &[]).expect_err("rejects");
+        let error = build_document(&did, &[], &[]).expect_err("rejects");
         assert!(matches!(error, TrustError::DocumentInvalid { .. }));
     }
 
@@ -257,5 +283,42 @@ mod tests {
             .verify(&[other.verifying_key()], at("2026-07-17T00:00:00Z"))
             .expect_err("a cert signed by root must not verify against a different root");
         assert!(matches!(error, TrustError::CertSignatureInvalid));
+    }
+
+    #[test]
+    fn build_document_with_no_services_emits_no_service_key() {
+        // Byte-compat: existing documents that carried no services must be
+        // identical to what the old zero-argument build_document produced.
+        let root = seeded_root(20);
+        let did = DidWeb::parse(DID).expect("parses");
+        let doc = build_document(&did, &[root.verifying_key()], &[]).expect("builds");
+        assert!(
+            doc.get("service").is_none(),
+            "empty services must not emit a service key"
+        );
+    }
+
+    #[test]
+    fn build_document_with_services_round_trips_through_the_verifier() {
+        let root = seeded_root(21);
+        let did = DidWeb::parse(DID).expect("parses");
+        let services = vec![ServiceEntry {
+            id: format!("{DID}#updates"),
+            service_type: "GreenticUpdateEndpoint".to_owned(),
+            service_endpoint: "https://updates.greentic.cloud".to_owned(),
+        }];
+
+        let doc = build_document(&did, &[root.verifying_key()], &services).expect("builds");
+        let bytes = serde_json::to_vec(&doc).expect("serializes");
+        let parsed = TrustDocument::parse(&did, &bytes).expect("verifier accepts it");
+
+        assert_eq!(parsed.assertion_keys().len(), 1);
+        assert_eq!(parsed.services().len(), 1);
+        assert_eq!(parsed.services()[0].id, format!("{DID}#updates"));
+        assert_eq!(parsed.services()[0].service_type, "GreenticUpdateEndpoint");
+        assert_eq!(
+            parsed.services()[0].service_endpoint,
+            "https://updates.greentic.cloud"
+        );
     }
 }
