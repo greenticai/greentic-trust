@@ -1,0 +1,17 @@
+name: Tag on Version Bump
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tag:
+    uses: greenticai/.github/.github/workflows/tag-on-version-bump.yml@main
+    secrets: inherit
